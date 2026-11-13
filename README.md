@@ -74,7 +74,7 @@ streamlit run app.py
   * Each leg's hit chance blends the model (60%) with the market's no-vig probability (40%). Spreads, totals
     and moneylines come from ESPN's lines. Props are included only where PrizePicks / Underdog posts a line.
     UFC legs need an ESPN moneyline.
-  * Parlays use at most one leg per game, so legs stay independent. The cards are: safest 2-leg, best-value
+  * Parlays use at most one leg per game, and no game appears on more than one card. The cards are: safest 2-leg, best-value
     3-leg and longshot 4-leg (MIX adds a 3-leg with every leg from a different sport).
   * Each card shows hit chance, estimated odds (ESPN moneylines, -110 spreads/totals, -115 pick'em props), fair
     odds and expected value.

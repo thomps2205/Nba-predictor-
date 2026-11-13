@@ -195,36 +195,44 @@ def value_legs(legs: list[Leg]) -> list[Leg]:
     return good
 
 
-def build(legs: list[Leg], sizes=(2, 3, 4), mixed: bool = False) -> list[dict]:
-    """Best parlays: safest 2-leg (max hit probability), best-value 3- and 4-leg (max EV).
-    mixed=True: every parlay spans 2+ sports, plus a 3-leg with every leg from a different sport."""
-    pool = value_legs(legs)[:MAX_POOL * (2 if mixed else 1)]
-    results: dict[int, list[dict]] = {}
-    for n in sizes:
-        combos = []
-        for c in itertools.combinations(pool, n):
-            if len({(l.sport, l.game_id) for l in c}) < n:  # one leg per game: legs stay independent
-                continue
-            n_sports = len({l.sport for l in c})
-            if mixed and n_sports < 2:
-                continue
-            p = math.prod(l.prob for l in c)
-            dec = math.prod(l.dec for l in c)
-            combos.append({"legs": list(c), "prob": p, "dec": dec, "ev": p * dec - 1, "n_sports": n_sports})
-        results[n] = combos
-    pre = "Mixed " if mixed else ""
+def _combos(pool: list[Leg], n: int, mixed: bool, all_sports: bool = False) -> list[dict]:
     out = []
-    if results.get(2):
-        best = max(results[2], key=lambda x: (x["ev"] > 0, x["prob"]))
-        out.append({"title": f"{pre}safest 2-leg".capitalize(), "tag": "SAFE", **best})
-    for n, title, tag in ((3, "best value 3-leg", "VALUE"), (4, "longshot 4-leg", "LONGSHOT")):
-        if results.get(n):
-            best = max(results[n], key=lambda x: x["ev"])
-            out.append({"title": f"{pre}{title}".capitalize(), "tag": tag, **best})
+    for c in itertools.combinations(pool, n):
+        if len({(l.sport, l.game_id) for l in c}) < n:  # one leg per game: legs stay independent
+            continue
+        n_sports = len({l.sport for l in c})
+        if (mixed and n_sports < 2) or (all_sports and n_sports < n):
+            continue
+        p = math.prod(l.prob for l in c)
+        dec = math.prod(l.dec for l in c)
+        out.append({"legs": list(c), "prob": p, "dec": dec, "ev": p * dec - 1, "n_sports": n_sports})
+    return out
+
+
+def build(legs: list[Leg], sizes=(2, 3, 4), mixed: bool = False) -> list[dict]:
+    """Best parlays, chosen in order (safest 2-leg by hit probability; for mixed, a 3-leg with every leg from a
+    different sport; best-value 3-leg and longshot 4-leg by EV). No game is reused across parlays, so the same
+    spread / total / pick never appears on two cards."""
+    pool = value_legs(legs)[:MAX_POOL * (2 if mixed else 1)]
+    used: set[tuple[str, str]] = set()
+    pre = "Mixed " if mixed else ""
+    plan = [(2, f"{pre}safest 2-leg".capitalize(), "SAFE", "prob", False)]
     if mixed:
-        spread = [c for c in results.get(3, []) if c["n_sports"] == 3]
-        if spread:
-            best = max(spread, key=lambda x: x["ev"])
-            if all(best["legs"] != o["legs"] for o in out):
-                out.insert(1, {"title": "One leg per sport (3 sports)", "tag": "MIXED", **best})
+        plan.append((3, "One leg per sport (3 sports)", "MIXED", "ev", True))
+    plan += [(3, f"{pre}best value 3-leg".capitalize(), "VALUE", "ev", False),
+             (4, f"{pre}longshot 4-leg".capitalize(), "LONGSHOT", "ev", False)]
+    out = []
+    for n, title, tag, key, all_sports in plan:
+        if n not in sizes:
+            continue
+        avail = [l for l in pool if (l.sport, l.game_id) not in used]
+        combos = _combos(avail, n, mixed, all_sports)
+        if not combos:
+            continue
+        if key == "prob":
+            best = max(combos, key=lambda x: (x["ev"] > 0, x["prob"]))
+        else:
+            best = max(combos, key=lambda x: x["ev"])
+        out.append({"title": title, "tag": tag, **best})
+        used |= {(l.sport, l.game_id) for l in best["legs"]}
     return out
