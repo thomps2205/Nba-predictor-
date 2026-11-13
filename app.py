@@ -21,6 +21,7 @@ Run:  streamlit run app.py
 from __future__ import annotations
 
 import hashlib
+import html as htmlmod
 import json
 import math
 import os
@@ -52,6 +53,10 @@ RATE_LIMIT_SECONDS = 0.6
 ESPN_SCOREBOARD = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
 ESPN_INJURIES = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/injuries"
 CDN_SCHEDULE = "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2.json"
+ESPN_SUMMARY = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary"
+CDN_DOWN_FLAG = "cdn_nba_down.flag"
+# ESPN season.type codes by season type
+ESPN_SEASON_TYPE = {"Regular Season": 2, "Playoffs": 3, "PlayIn": 5}
 
 # stats.nba.com silently drops many cloud-host requests (e.g. Streamlit Cloud), so fail fast
 # and remember the failure; the app then falls back to box scores on cdn.nba.com.
@@ -222,18 +227,29 @@ def nba_call(endpoint_cls, **kwargs) -> dict:
     raise RuntimeError(f"stats.nba.com request failed: {endpoint_cls.__name__} ({type(last_err).__name__})") from last_err
 
 
+def flag_active(name: str, ttl: int = STATS_DOWN_TTL) -> bool:
+    flag = CACHE_DIR / name
+    return flag.exists() and time.time() - flag.stat().st_mtime < ttl
+
+
 def cdn_get(url: str) -> dict:
+    if flag_active(CDN_DOWN_FLAG):
+        raise RuntimeError("cdn.nba.com did not respond recently; skipping it for now")
     last_err: Exception | None = None
-    for attempt in range(3):
+    for attempt in range(2):
         throttle()
         try:
-            r = _session.get(url, headers=CDN_HEADERS, timeout=20)
+            r = _session.get(url, headers=CDN_HEADERS, timeout=NBA_STATS_TIMEOUT)
             r.raise_for_status()
             return r.json()
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as err:
+            last_err = err
+            break
         except Exception as err:
             last_err = err
-            time.sleep(1.5 * (attempt + 1))
-    raise RuntimeError(f"cdn.nba.com request failed: {url}") from last_err
+            time.sleep(1.5)
+    (CACHE_DIR / CDN_DOWN_FLAG).touch()
+    raise RuntimeError(f"cdn.nba.com request failed ({type(last_err).__name__}: {last_err})") from last_err
 
 
 def result_set_df(payload: dict, index: int = 0) -> pd.DataFrame:
@@ -359,6 +375,12 @@ def load_schedule(d: date, today: date) -> pd.DataFrame:
                 "home": espn_abbr_to_nba(h_espn),
                 "away": espn_abbr_to_nba(a_espn),
                 "home_name": h["team"].get("displayName", h_espn),
+                "home_short": h["team"].get("shortDisplayName") or h["team"].get("name") or h_espn,
+                "away_short": a["team"].get("shortDisplayName") or a["team"].get("name") or a_espn,
+                "home_logo": h["team"].get("logo", ""),
+                "away_logo": a["team"].get("logo", ""),
+                "home_record": ((h.get("records") or [{}])[0] or {}).get("summary", ""),
+                "away_record": ((a.get("records") or [{}])[0] or {}).get("summary", ""),
                 "away_name": a["team"].get("displayName", a_espn),
                 "home_score": h.get("score"),
                 "away_score": a.get("score"),
@@ -465,31 +487,68 @@ def load_player_logs(season: str, season_type: str) -> pd.DataFrame:
 
 
 # --------------------------------------------------------------------------
-# Fallback loaders: nba_api live box scores (cdn.nba.com)
+# Fallback loaders: box scores from cdn.nba.com (nba_api live) or ESPN summaries
+# Both are reduced to the same compact per-game format, then aggregated into
+# team ratings and a LeagueGameLog-style player table.
 # --------------------------------------------------------------------------
 def _num(v) -> float:
+    if isinstance(v, dict):
+        v = v.get("value", v.get("displayValue"))
+    if isinstance(v, str):
+        v = v.strip().replace("+", "")
     try:
         return float(v)
     except (TypeError, ValueError):
         return 0.0
 
 
-def _compact_boxscore(payload: dict, game_date: str) -> dict:
+def _made_att(v) -> tuple[float, float]:
+    """'40-88' -> (40, 88)."""
+    if isinstance(v, str) and "-" in v.lstrip("-"):
+        m, _, a = v.partition("-")
+        return _num(m), _num(a)
+    return 0.0, 0.0
+
+
+def _parse_date(raw: str) -> date | None:
+    raw = (raw or "").strip()
+    for fmt, n in (("%Y-%m-%d", 10), ("%m/%d/%Y", 10), ("%Y%m%d", 8)):
+        try:
+            return datetime.strptime(raw[:n], fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _season_window(season: str, season_type: str) -> tuple[date, date]:
+    start_year = int(season[:4])
+    if season_type == "Regular Season":
+        return date(start_year, 9, 15), date(start_year + 1, 4, 30)
+    return date(start_year + 1, 4, 1), date(start_year + 1, 7, 1)
+
+
+def _box_key(src: str, gid: str) -> str:
+    return f"{src}_box|{gid}"
+
+
+# ---- cdn.nba.com ---------------------------------------------------------
+def _compact_cdn_boxscore(payload: dict, game_date: str) -> dict:
     g = payload.get("game", payload)
     teams = []
     for side in ("homeTeam", "awayTeam"):
-        t = g[side]
+        t = g.get(side) or {}
         s = t.get("statistics", {}) or {}
         players = []
         for p in t.get("players", []) or []:
             ps = p.get("statistics", {}) or {}
-            if str(p.get("played", "1")) != "1" or to_minutes(ps.get("minutes")) <= 0:
+            mins = to_minutes(ps.get("minutes"))
+            if str(p.get("played", "1")) != "1" or mins <= 0:
                 continue
             players.append(
                 {
                     "id": p.get("personId"),
                     "name": p.get("name") or f"{p.get('firstName', '')} {p.get('familyName', '')}".strip(),
-                    "min": to_minutes(ps.get("minutes")),
+                    "min": mins,
                     "pts": _num(ps.get("points")),
                     "reb": _num(ps.get("reboundsTotal")),
                     "ast": _num(ps.get("assists")),
@@ -516,69 +575,258 @@ def _compact_boxscore(payload: dict, game_date: str) -> dict:
     return {"game_id": g.get("gameId"), "date": game_date, "teams": teams}
 
 
-def fetch_boxscore(game_id: str, game_date: str) -> dict:
-    def _fetch():
-        throttle()
-        payload = live_boxscore.BoxScore(game_id, headers=CDN_HEADERS, timeout=20).get_dict()
-        return _compact_boxscore(payload, game_date)
-
-    return disk_cached(f"cdn_box|{game_id}", TTL_FINAL_BOXSCORE, _fetch)
-
-
-def finished_games(season: str, season_type: str, before: date) -> list[tuple[str, str]]:
+def cdn_finished_games(season: str, season_type: str, before: date) -> list[tuple[str, str]]:
     data = disk_cached("cdn_schedule", TTL_CDN_SCHEDULE, lambda: cdn_get(CDN_SCHEDULE))
-    ls = data.get("leagueSchedule", {})
-    if ls.get("seasonYear") and ls["seasonYear"] != season:
-        raise RuntimeError(f"cdn.nba.com only has the {ls['seasonYear']} schedule (requested {season})")
+    ls = data.get("leagueSchedule") or data.get("leagueschedule") or {}
     prefix = GAME_ID_PREFIX.get(season_type, "002")
+    lo, hi = _season_window(season, season_type)
     out = []
-    for gd in ls.get("gameDates", []):
-        for g in gd.get("games", []):
+    for gd in ls.get("gameDates", []) or []:
+        for g in gd.get("games", []) or []:
             gid = str(g.get("gameId", ""))
-            if not gid.startswith(prefix) or int(g.get("gameStatus", 0) or 0) != 3:
-                continue
-            raw = g.get("gameDateEst") or gd.get("gameDate", "")
             try:
-                gdate = (datetime.strptime(raw[:10], "%Y-%m-%d") if "-" in raw[:10]
-                         else datetime.strptime(raw[:10], "%m/%d/%Y")).date()
-            except ValueError:
+                status = int(g.get("gameStatus") or 0)
+            except (TypeError, ValueError):
+                status = 0
+            if not gid.startswith(prefix) or status != 3:
                 continue
-            if gdate < before:
+            gdate = None
+            for k in ("gameDateEst", "gameDateTimeEst", "gameDate"):
+                gdate = _parse_date(g.get(k, ""))
+                if gdate:
+                    break
+            gdate = gdate or _parse_date(gd.get("gameDate", ""))
+            if gdate and lo <= gdate < min(before, hi):
                 out.append((gid, gdate.isoformat()))
     return out
 
 
+def cdn_fetch_boxscore(game_id: str, game_date: str) -> None:
+    def _fetch():
+        if flag_active(CDN_DOWN_FLAG):
+            raise RuntimeError("cdn.nba.com marked down")
+        throttle()
+        payload = live_boxscore.BoxScore(game_id, headers=CDN_HEADERS, timeout=NBA_STATS_TIMEOUT).get_dict()
+        return _compact_cdn_boxscore(payload, game_date)
+
+    disk_cached(_box_key("cdn", game_id), TTL_FINAL_BOXSCORE, _fetch)
+
+
+# ---- ESPN ----------------------------------------------------------------
+def _espn_events(payload: dict) -> list[dict]:
+    return payload.get("events", []) or []
+
+
+def espn_finished_games(season: str, season_type: str, before: date) -> list[tuple[str, str]]:
+    """Completed games from ESPN's scoreboard: one date-range request, per-day as a fallback."""
+    lo, hi = _season_window(season, season_type)
+    end = min(before - timedelta(days=1), hi)
+    if end < lo:
+        return []
+    want_type = ESPN_SEASON_TYPE.get(season_type)
+
+    def keep(ev) -> tuple[str, str] | None:
+        st_type = ((ev.get("status") or {}).get("type") or {})
+        if st_type.get("state") != "post" and not st_type.get("completed"):
+            return None
+        ev_type = (ev.get("season") or {}).get("type")
+        if want_type and ev_type and int(ev_type) != want_type:
+            return None
+        tip = pd.to_datetime(ev.get("date"), utc=True, errors="coerce")
+        if pd.isna(tip):
+            return None
+        gdate = tip.tz_convert(ET).date()
+        return (str(ev.get("id")), gdate.isoformat()) if lo <= gdate < before else None
+
+    games: dict[str, str] = {}
+    rng = f"{lo:%Y%m%d}-{end:%Y%m%d}"
+    try:
+        data = disk_cached(f"espn_scoreboard_range|{rng}", TTL_CDN_SCHEDULE,
+                           lambda: espn_get(ESPN_SCOREBOARD, {"dates": rng, "limit": 1500}))
+        for ev in _espn_events(data):
+            k = keep(ev)
+            if k:
+                games[k[0]] = k[1]
+    except Exception:
+        pass
+    if not games:  # range query unsupported or empty -> walk the days
+        d = lo
+        while d <= end:
+            ymd = d.strftime("%Y%m%d")
+            try:
+                data = disk_cached(f"espn_scoreboard|{ymd}", TTL_SCOREBOARD_PAST,
+                                   lambda ymd=ymd: espn_get(ESPN_SCOREBOARD, {"dates": ymd}))
+                for ev in _espn_events(data):
+                    k = keep(ev)
+                    if k:
+                        games[k[0]] = k[1]
+            except Exception:
+                pass
+            d += timedelta(days=1)
+    return sorted(games.items(), key=lambda x: x[1])
+
+
+def _col_index(block: dict, *cands: str) -> int | None:
+    for arr_name in ("keys", "names", "labels"):
+        arr = [str(x).lower() for x in (block.get(arr_name) or [])]
+        for c in cands:
+            if c.lower() in arr:
+                return arr.index(c.lower())
+    return None
+
+
+def _compact_espn_summary(payload: dict, game_date: str) -> dict:
+    comp = ((payload.get("header") or {}).get("competitions") or [{}])[0]
+    competitors = comp.get("competitors", []) or []
+    periods = max([len(c.get("linescores") or []) for c in competitors] + [4])
+    team_min = 240.0 + 25.0 * max(0, periods - 4)
+
+    teams: dict[str, dict] = {}
+    for c in competitors:
+        tm = c.get("team") or {}
+        tid = str(tm.get("id") or c.get("id"))
+        tri = espn_abbr_to_nba(tm.get("abbreviation", ""))
+        teams[tid] = {
+            "side": "homeTeam" if c.get("homeAway") == "home" else "awayTeam",
+            "id": NBA_TEAM_BY_ABBR.get(tri, {}).get("id", tid),
+            "tri": tri,
+            "pts": _num(c.get("score")),
+            "fga": 0.0, "fta": 0.0, "oreb": 0.0, "tov": 0.0, "reb": 0.0, "ast": 0.0,
+            "min": team_min,
+            "players": [],
+        }
+
+    box = payload.get("boxscore") or {}
+    for t in box.get("teams", []) or []:
+        tid = str((t.get("team") or {}).get("id"))
+        if tid not in teams:
+            continue
+        stats = {}
+        for s in t.get("statistics", []) or []:
+            for k in (s.get("name"), s.get("abbreviation"), s.get("label")):
+                if k:
+                    stats[str(k).lower()] = s.get("displayValue")
+        T = teams[tid]
+        T["fga"] = _made_att(stats.get("fieldgoalsmade-fieldgoalsattempted") or stats.get("fg"))[1]
+        T["fta"] = _made_att(stats.get("freethrowsmade-freethrowsattempted") or stats.get("ft"))[1]
+        T["oreb"] = _num(stats.get("offensiverebounds") or stats.get("oreb") or stats.get("offensive rebounds"))
+        T["tov"] = _num(stats.get("totalturnovers") or stats.get("turnovers") or stats.get("to"))
+        T["reb"] = _num(stats.get("totalrebounds") or stats.get("rebounds") or stats.get("reb"))
+        T["ast"] = _num(stats.get("assists") or stats.get("ast"))
+
+    for pt in box.get("players", []) or []:
+        tid = str((pt.get("team") or {}).get("id"))
+        if tid not in teams:
+            continue
+        T = teams[tid]
+        sums = {"fga": 0.0, "fta": 0.0, "oreb": 0.0, "tov": 0.0, "reb": 0.0, "ast": 0.0}
+        for blk in pt.get("statistics", []) or []:
+            ix = {
+                "min": _col_index(blk, "minutes", "min"),
+                "pts": _col_index(blk, "points", "pts"),
+                "reb": _col_index(blk, "rebounds", "totalRebounds", "reb"),
+                "ast": _col_index(blk, "assists", "ast"),
+                "fg": _col_index(blk, "fieldGoalsMade-fieldGoalsAttempted", "fg"),
+                "fg3": _col_index(blk, "threePointFieldGoalsMade-threePointFieldGoalsAttempted", "3pt"),
+                "ft": _col_index(blk, "freeThrowsMade-freeThrowsAttempted", "ft"),
+                "oreb": _col_index(blk, "offensiveRebounds", "oreb"),
+                "tov": _col_index(blk, "turnovers", "to"),
+                "pm": _col_index(blk, "plusMinus", "+/-"),
+            }
+
+            def val(stats, key):
+                i = ix[key]
+                return stats[i] if i is not None and i < len(stats) else None
+
+            for ath in blk.get("athletes", []) or []:
+                stats = ath.get("stats") or []
+                if ath.get("didNotPlay") or not stats:
+                    continue
+                mins = to_minutes(val(stats, "min"))
+                if mins <= 0:
+                    continue
+                a = ath.get("athlete") or {}
+                T["players"].append(
+                    {
+                        "id": a.get("id"),
+                        "name": a.get("displayName") or a.get("shortName") or "",
+                        "min": mins,
+                        "pts": _num(val(stats, "pts")),
+                        "reb": _num(val(stats, "reb")),
+                        "ast": _num(val(stats, "ast")),
+                        "fg3m": _made_att(val(stats, "fg3"))[0],
+                        "pm": _num(val(stats, "pm")),
+                    }
+                )
+                sums["fga"] += _made_att(val(stats, "fg"))[1]
+                sums["fta"] += _made_att(val(stats, "ft"))[1]
+                sums["oreb"] += _num(val(stats, "oreb"))
+                sums["tov"] += _num(val(stats, "tov"))
+                sums["reb"] += _num(val(stats, "reb"))
+                sums["ast"] += _num(val(stats, "ast"))
+        for k, v in sums.items():  # team totals missing -> use player sums
+            if not T[k]:
+                T[k] = v
+        if not T["pts"]:
+            T["pts"] = sum(p["pts"] for p in T["players"])
+    return {"game_id": str((payload.get("header") or {}).get("id", "")), "date": game_date,
+            "teams": list(teams.values())}
+
+
+def espn_fetch_boxscore(event_id: str, game_date: str) -> None:
+    def _fetch():
+        return _compact_espn_summary(espn_get(ESPN_SUMMARY, {"event": event_id}), game_date)
+
+    disk_cached(_box_key("espn", event_id), TTL_FINAL_BOXSCORE, _fetch)
+
+
+BOX_SOURCES = {
+    "cdn": ("NBA box scores on cdn.nba.com (nba_api live)", cdn_finished_games, cdn_fetch_boxscore),
+    "espn": ("ESPN game box scores", espn_finished_games, espn_fetch_boxscore),
+}
+
+
+# ---- aggregation -----------------------------------------------------------
 @st.cache_data(ttl=3600, show_spinner=False, max_entries=8)
-def build_from_boxscores(game_keys: tuple[tuple[str, str], ...]) -> tuple[pd.DataFrame, pd.DataFrame]:
+def build_from_boxscores(src: str, game_keys: tuple[tuple[str, str], ...]) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Team ratings (Pace/OffRtg/DefRtg/opp REB & AST) and a LeagueGameLog-style player table."""
     team_rows, player_rows = [], []
     for gid, gdate in game_keys:
-        path = _cache_path(f"cdn_box|{gid}")
+        path = _cache_path(_box_key(src, gid))
         if not path.exists():
             continue
-        with path.open() as f:
-            box = json.load(f)
-        if len(box.get("teams", [])) != 2:
+        try:
+            with path.open() as f:
+                box = json.load(f)
+            a, b = box["teams"]
+            if not a.get("tri") or not b.get("tri") or a["tri"] == b["tri"]:
+                continue
+            poss_a = a["fga"] + 0.44 * a["fta"] - a["oreb"] + a["tov"]
+            poss_b = b["fga"] + 0.44 * b["fta"] - b["oreb"] + b["tov"]
+            game_poss = (poss_a + poss_b) / 2
+            if game_poss < 60 or a["pts"] <= 0 or b["pts"] <= 0:  # incomplete box score
+                continue
+        except Exception:
             continue
-        a, b = box["teams"]
-        poss = {t["tri"]: t["fga"] + 0.44 * t["fta"] - t["oreb"] + t["tov"] for t in (a, b)}
-        game_poss = (poss[a["tri"]] + poss[b["tri"]]) / 2
         for t, o in ((a, b), (b, a)):
             win = t["pts"] > o["pts"]
             team_rows.append(
                 {"ABBR": t["tri"], "TEAM_ID": t["id"], "W": int(win), "L": int(not win), "PTS": t["pts"],
-                 "OPP_PTS": o["pts"], "POSS": game_poss, "MIN": t["min"], "OPP_REB": o["reb"], "OPP_AST": o["ast"]}
+                 "OPP_PTS": o["pts"], "POSS": game_poss, "MIN": t["min"] or 240.0,
+                 "OPP_REB": o["reb"], "OPP_AST": o["ast"]}
             )
             matchup = f"{t['tri']} vs. {o['tri']}" if t["side"] == "homeTeam" else f"{t['tri']} @ {o['tri']}"
             for p in t["players"]:
+                if not p.get("id") or not p.get("name"):
+                    continue
                 player_rows.append(
-                    {"PLAYER_ID": p["id"], "PLAYER_NAME": p["name"], "TEAM_ID": t["id"],
+                    {"PLAYER_ID": str(p["id"]), "PLAYER_NAME": p["name"], "TEAM_ID": t["id"],
                      "TEAM_ABBREVIATION": t["tri"], "GAME_ID": gid, "GAME_DATE": date.fromisoformat(gdate),
                      "MATCHUP": matchup, "WL": "W" if win else "L", "MIN": p["min"], "PTS": p["pts"],
                      "REB": p["reb"], "AST": p["ast"], "FG3M": p["fg3m"], "PLUS_MINUS": p["pm"]}
                 )
     tg = pd.DataFrame(team_rows)
-    if tg.empty:
+    if tg.empty or not player_rows:
         return pd.DataFrame(), pd.DataFrame()
     agg = tg.groupby("ABBR").agg(
         TEAM_ID=("TEAM_ID", "first"), GP=("W", "size"), W=("W", "sum"), L=("L", "sum"), PTS=("PTS", "sum"),
@@ -597,27 +845,33 @@ def build_from_boxscores(game_keys: tuple[tuple[str, str], ...]) -> tuple[pd.Dat
     return team_stats, logs
 
 
-def load_from_boxscores(season: str, season_type: str, before: date) -> tuple[pd.DataFrame, pd.DataFrame]:
-    games = finished_games(season, season_type, before)
+def load_from_boxscores(src: str, season: str, season_type: str, before: date) -> tuple[pd.DataFrame, pd.DataFrame]:
+    label, list_games, fetch_one = BOX_SOURCES[src]
+    games = list_games(season, season_type, before)
     if not games:
-        raise RuntimeError(f"No finished {season} {season_type} games before {before} on cdn.nba.com")
-    missing = [g for g in games if not _cache_path(f"cdn_box|{g[0]}").exists()]
+        raise RuntimeError(f"no finished {season} {season_type} games found before {before}")
+    missing = [g for g in games if not _cache_path(_box_key(src, g[0])).exists()]
     failures = 0
     if missing:
         bar = st.progress(0.0)
         for i, (gid, gdate) in enumerate(missing, 1):
             try:
-                fetch_boxscore(gid, gdate)
+                fetch_one(gid, gdate)
             except Exception:
                 failures += 1
-            bar.progress(i / len(missing), text=f"Downloading NBA box scores {i}/{len(missing)} "
-                                                 "(first load only; cached afterwards)…")
+                # Source clearly unreachable: stop early instead of timing out on every game.
+                if i >= 5 and failures == i:
+                    break
+            bar.progress(i / len(missing), text=f"Loading {label}: {i}/{len(missing)} "
+                                                 "(first load only — cached afterwards)")
         bar.empty()
-    if failures > 0.2 * len(games):
-        raise RuntimeError(f"{failures} of {len(games)} box scores could not be downloaded from cdn.nba.com")
-    if failures:
-        st.warning(f"{failures} box score(s) could not be downloaded; ratings use the other {len(games) - failures}.")
-    return build_from_boxscores(tuple(games))
+    have = sum(_cache_path(_box_key(src, g[0])).exists() for g in games)
+    if have < max(1, 0.5 * len(games)):
+        raise RuntimeError(f"only {have} of {len(games)} box scores could be downloaded")
+    team_stats, logs = build_from_boxscores(src, tuple(games))
+    if team_stats.empty or logs.empty or len(team_stats) < 2:
+        raise RuntimeError("box scores did not contain usable team/player stats")
+    return team_stats, logs
 
 
 # --------------------------------------------------------------------------
@@ -795,8 +1049,12 @@ def project_players(
             "REB": rate["REB"] * pm * pace_f * reb_f * usg_reb,
             "AST": rate["AST"] * pm * pace_f * ast_f * usg_ast * eff_b2b,
         }
+        g5 = g.head(5)
         row = {
             "Player": r["PLAYER"],
+            "Team": team,
+            "Opp": opp,
+            "Class": r["CLASS"],
             "Status": r["STATUS"],
             "L10 MIN": r["L10_MIN"],
             "Proj MIN": pm,
@@ -807,255 +1065,465 @@ def project_players(
             row[f"Proj {s}"] = proj[s]
             row[f"{s} Line"] = line
             row[f"{s} L10 Over%"] = float((g[s] > line).mean() * 100)
+            row[f"L5 {s}"] = float(g5[s].mean())
+            row[f"L5 {s} vals"] = [float(x) for x in g5[s]]
         pra = proj["PTS"] + proj["REB"] + proj["AST"]
         row["Proj PRA"] = pra
         row["PRA Line"] = book_line(pra)
+        g5_pra = g5["PTS"] + g5["REB"] + g5["AST"]
+        row["L5 PRA"] = float(g5_pra.mean())
+        row["L5 PRA vals"] = [float(x) for x in g5_pra]
+        row["PRA L10 Over%"] = float(((g["PTS"] + g["REB"] + g["AST"]) > row["PRA Line"]).mean() * 100)
         row["_pid"] = r["PLAYER_ID"]
         out.append(row)
     return pd.DataFrame(out).sort_values("Proj PTS", ascending=False).reset_index(drop=True)
 
 
 # --------------------------------------------------------------------------
-# UI
+# UI  (sportsbook-style dark cards; every block degrades gracefully)
 # --------------------------------------------------------------------------
-st.set_page_config(page_title="NBA Predictor", page_icon="🏀", layout="wide")
-st.title("🏀 NBA Game & Player Prop Predictor")
-st.caption("Live data: ESPN (schedule, injuries, lines) + stats.nba.com via nba_api (advanced team stats, player game logs).")
+st.set_page_config(page_title="NBA Predictor", page_icon="🏀", layout="centered",
+                   initial_sidebar_state="collapsed")
+
+CSS = """
+<style>
+:root{--bg:#0b0f14;--card:#121821;--card2:#18202b;--line:#232d3a;--text:#e8edf3;--muted:#8b97a7;
+--green:#22c55e;--green-bg:rgba(34,197,94,.14);--red:#f43f5e;--red-bg:rgba(244,63,94,.14);
+--amber:#f59e0b;--amber-bg:rgba(245,158,11,.15);--blue:#38bdf8;--blue-bg:rgba(56,189,248,.14)}
+.stApp{background:var(--bg)}
+.block-container{padding:1.2rem .8rem 3rem;max-width:760px}
+#MainMenu,footer{visibility:hidden}
+h1,h2,h3{letter-spacing:-.01em}
+.hero{display:flex;justify-content:space-between;align-items:flex-end;margin:.2rem 0 .8rem}
+.brand{font-size:1.45rem;font-weight:800;color:var(--text)}
+.brand span{color:var(--green)}
+.hero-sub{color:var(--muted);font-size:.82rem;text-align:right;line-height:1.3}
+.stTabs [data-baseweb="tab-list"]{gap:4px;background:var(--card);border:1px solid var(--line);
+border-radius:14px;padding:4px}
+.stTabs [data-baseweb="tab"]{flex:1;justify-content:center;border-radius:10px;padding:.55rem .2rem;
+color:var(--muted);font-weight:600;height:auto}
+.stTabs [data-baseweb="tab"] p{font-size:.86rem}
+.stTabs [aria-selected="true"]{background:var(--card2);color:var(--text)}
+.stTabs [data-baseweb="tab-highlight"],.stTabs [data-baseweb="tab-border"]{display:none}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:14px 14px 12px;
+margin:0 0 12px;color:var(--text)}
+.ghead{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;gap:8px}
+.gtime{color:var(--muted);font-size:.78rem;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+.tags{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
+.pill{display:inline-block;font-size:.66rem;font-weight:700;padding:3px 7px;border-radius:999px;
+letter-spacing:.03em;text-transform:uppercase;white-space:nowrap}
+.pill.live{background:var(--red-bg);color:var(--red)}
+.pill.final{background:var(--card2);color:var(--muted)}
+.pill.b2b{background:var(--amber-bg);color:var(--amber)}
+.pill.out{background:var(--red-bg);color:var(--red)}
+.pill.q{background:var(--amber-bg);color:var(--amber)}
+.pill.ok{background:var(--green-bg);color:var(--green)}
+.pill.info{background:var(--blue-bg);color:var(--blue)}
+.trow{display:flex;align-items:center;gap:10px;padding:6px 0}
+.logo{width:34px;height:34px;object-fit:contain;flex:none}
+.logo-fb{width:34px;height:34px;border-radius:50%;background:var(--card2);display:flex;align-items:center;
+justify-content:center;font-size:.62rem;font-weight:800;color:var(--muted);flex:none}
+.tinfo{flex:1;min-width:0}
+.tabbr{font-weight:800;font-size:1rem}
+.tabbr .rec{color:var(--muted);font-weight:500;font-size:.75rem;margin-left:4px}
+.tname{color:var(--muted);font-size:.75rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tscore{font-weight:800;font-size:1.3rem;min-width:34px;text-align:right}
+.tproj{text-align:right;min-width:62px}
+.tproj .lbl,.lbl{display:block;color:var(--muted);font-size:.6rem;font-weight:700;letter-spacing:.06em;
+text-transform:uppercase}
+.tproj .num{font-weight:800;font-size:1.15rem;color:var(--green)}
+.winbar{display:flex;height:6px;border-radius:999px;overflow:hidden;background:var(--card2);margin:8px 0 4px}
+.winbar .a{background:#64748b}.winbar .h{background:var(--green)}
+.winlbl{display:flex;justify-content:space-between;color:var(--muted);font-size:.7rem;margin-bottom:10px}
+.mkts{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.mkt{background:var(--card2);border:1px solid var(--line);border-radius:12px;padding:9px 8px;text-align:center}
+.mkt .val{font-weight:800;font-size:1rem;margin:2px 0}
+.mkt .sub{color:var(--muted);font-size:.68rem;margin-bottom:6px;white-space:nowrap;overflow:hidden;
+text-overflow:ellipsis}
+.badge{display:inline-block;font-size:.64rem;font-weight:800;padding:4px 8px;border-radius:8px;
+letter-spacing:.02em;white-space:nowrap}
+.badge.strong{background:var(--green);color:#04210f}
+.badge.lean{background:var(--green-bg);color:var(--green)}
+.badge.under-strong{background:var(--red);color:#2a0710}
+.badge.under-lean{background:var(--red-bg);color:var(--red)}
+.badge.muted{background:transparent;color:var(--muted);border:1px solid var(--line)}
+.note{color:var(--muted);font-size:.74rem;margin:2px 2px 12px;line-height:1.45}
+.phead{display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:10px}
+.pname{font-weight:800;font-size:1rem}
+.psub{color:var(--muted);font-size:.74rem;margin-top:2px}
+.pgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:10px}
+.pbox{background:var(--card2);border:1px solid var(--line);border-radius:10px;padding:7px 4px;text-align:center}
+.pbox .num{font-weight:800;font-size:1.05rem;margin-top:1px}
+.pbox.hl{border-color:rgba(34,197,94,.45)}
+.pbox.hl .num{color:var(--green)}
+.l5{display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin-bottom:8px}
+.chip{font-size:.72rem;font-weight:700;padding:3px 7px;border-radius:7px;min-width:26px;text-align:center}
+.chip.o{background:var(--green-bg);color:var(--green)}
+.chip.u{background:var(--red-bg);color:var(--red)}
+.mini{display:flex;justify-content:space-between;color:var(--muted);font-size:.72rem;border-top:1px solid var(--line);
+padding-top:8px}
+.mini b{color:var(--text)}
+.ihead{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+.irow{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 0;
+border-top:1px solid var(--line)}
+.irow .who{min-width:0}
+.irow .nm{font-weight:700;font-size:.9rem}
+.irow .dt{color:var(--muted);font-size:.72rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:56vw}
+.empty{color:var(--muted);font-size:.8rem;padding:6px 0}
+div[data-testid="stExpander"]{background:var(--card);border:1px solid var(--line);border-radius:14px}
+@media (max-width:420px){.mkt .val{font-size:.92rem}.pbox .num{font-size:.95rem}.brand{font-size:1.25rem}}
+</style>
+"""
+st.markdown(CSS, unsafe_allow_html=True)
+
+esc = htmlmod.escape
+
+
+def H(markup: str) -> None:
+    st.markdown(markup, unsafe_allow_html=True)
+
+
+def logo_html(url: str, abbr: str) -> str:
+    if url:
+        return f'<img class="logo" src="{esc(url)}" alt="{esc(abbr)}">'
+    return f'<div class="logo-fb">{esc(abbr)}</div>'
+
+
+def edge_badge(edge: float | None, lean: float, strong: float, pos: str, neg: str, neg_is_red: bool = False) -> str:
+    if edge is None or (isinstance(edge, float) and np.isnan(edge)):
+        return '<span class="badge muted">NO LINE</span>'
+    a = abs(edge)
+    if a < lean:
+        return '<span class="badge muted">NO EDGE</span>'
+    level = "strong" if a >= strong else "lean"
+    cls = f"under-{level}" if (edge < 0 and neg_is_red) else level
+    label = pos if edge > 0 else neg
+    return f'<span class="badge {cls}">{esc(label)} · {a:.1f}</span>'
+
+
+def fav_line(spread_home: float, home: str, away: str) -> str:
+    if abs(spread_home) < 0.25:
+        return "PK"
+    return f"{home} -{abs(spread_home):.1f}" if spread_home < 0 else f"{away} -{abs(spread_home):.1f}"
+
+
+def status_pill(cls: str, status: str) -> str:
+    if cls == "OUT":
+        return f'<span class="pill out">{esc(status or "Out")}</span>'
+    if cls == "Q":
+        return f'<span class="pill q">{esc(status or "Questionable")}</span>'
+    return ""
+
 
 now_et = datetime.now(ET)
 today_et = now_et.date()
 
-with st.sidebar:
-    st.header("Settings")
+# ---- Settings (expander works better than a sidebar on phones) ----------
+with st.expander("⚙️  Settings", expanded=False):
     game_date = st.date_input("Slate date (ET)", value=today_et)
-    season = st.text_input("Season", value=season_for(game_date))
-    season_type = st.selectbox("Season type", ["Regular Season", "Playoffs", "PlayIn"], index=0)
+    c1, c2 = st.columns(2)
+    season = c1.text_input("Season", value=season_for(game_date))
+    season_type = c2.selectbox("Season type", ["Regular Season", "Playoffs", "PlayIn"], index=0)
     q_sit_prob = st.slider("Chance a Questionable / Day-to-Day player sits", 0.0, 1.0, 0.5, 0.05)
-    if st.button("🔄 Refresh all data"):
+    if st.button("🔄 Refresh all data", width="stretch"):
         clear_disk_cache()
         st.cache_data.clear()
         st.session_state.pop("stale_notes", None)
         st.rerun()
-    st.caption(f"Cache dir: `{CACHE_DIR}`  \nRequests throttled to ≥ {RATE_LIMIT_SECONDS}s apart.")
 
-# ---- Schedule -----------------------------------------------------------
+# ---- Schedule (ESPN) -----------------------------------------------------
 try:
-    with st.spinner("Loading ESPN schedule…"):
+    with st.spinner("Loading today's games…"):
         sched = load_schedule(game_date, today_et)
-        sched_prev = load_schedule(game_date - timedelta(days=1), today_et)
 except Exception as e:
-    st.error(f"Could not load the ESPN schedule and no cached copy exists: {e}")
+    H(f'<div class="card"><b>Couldn\'t load the ESPN schedule.</b><div class="note">{esc(str(e))}</div></div>')
     st.stop()
+try:
+    sched_prev = load_schedule(game_date - timedelta(days=1), today_et)
+except Exception:
+    sched_prev = pd.DataFrame(columns=["home", "away"])
+
+H(f'<div class="hero"><div class="brand">🏀 NBA <span>Predictor</span></div>'
+  f'<div class="hero-sub">{game_date:%a, %b %d}<br>{len(sched)} game{"s" if len(sched) != 1 else ""}</div></div>')
 
 if sched.empty:
-    st.info(f"No NBA games scheduled on {game_date:%A, %B %d, %Y}.")
+    H(f'<div class="card"><b>No NBA games on {game_date:%A, %B %d}.</b>'
+      '<div class="note">Pick another date in Settings.</div></div>')
     st.stop()
 
 b2b_teams = set(sched_prev["home"]).union(sched_prev["away"]) if not sched_prev.empty else set()
 
-# ---- Injuries -----------------------------------------------------------
+# ---- Injuries (ESPN) -----------------------------------------------------
+injury_note = ""
 try:
-    with st.spinner("Loading ESPN injury report…"):
-        injuries = load_injuries()
+    injuries = load_injuries()
 except Exception as e:
-    st.warning(f"Injury report unavailable ({e}); projections run without injury adjustments.")
     injuries = pd.DataFrame(columns=["team", "player", "key", "status", "detail", "updated"])
+    injury_note = f"Injury report unavailable ({e}); projections run without injury adjustments."
 
-# ---- Team stats + player logs ------------------------------------------
-stats_season = season
-data_source = "stats.nba.com (nba_api)"
+# ---- Team ratings + player logs: stats.nba.com -> cdn.nba.com -> ESPN ----
+source_errors: dict[str, str] = {}
 team_stats = logs = None
-stats_err: Exception | None = None
+data_source = ""
+stats_season = season
+
 try:
-    with st.spinner("Loading team advanced stats and player game logs from stats.nba.com…"):
-        team_stats = load_team_stats(season, season_type)
-        logs = load_player_logs(season, season_type)
-        if team_stats.empty or logs.empty or (logs["GAME_DATE"] < game_date).sum() == 0:
+    with st.spinner("Loading team ratings from stats.nba.com…"):
+        ts_ = load_team_stats(season, season_type)
+        lg_ = load_player_logs(season, season_type)
+        if ts_.empty or lg_.empty or not (lg_["GAME_DATE"] < game_date).any():
             stats_season = prev_season(season)
-            team_stats = load_team_stats(stats_season, season_type)
-            logs = load_player_logs(stats_season, season_type)
-            st.info(f"No {season} {season_type} data before {game_date}; using {stats_season} stats instead.")
+            ts_ = load_team_stats(stats_season, season_type)
+            lg_ = load_player_logs(stats_season, season_type)
+        if not ts_.empty and not lg_.empty:
+            team_stats, logs, data_source = ts_, lg_, "stats.nba.com (nba_api)"
 except Exception as e:
-    stats_err = e
-    team_stats = logs = None
+    source_errors["stats.nba.com"] = str(e)
     stats_season = season
 
 if team_stats is None:
-    data_source = "NBA box scores on cdn.nba.com (nba_api live)"
-    st.info(
-        "stats.nba.com is not responding (it often blocks cloud servers), so team ratings and "
-        "player game logs are being built from official NBA box scores instead."
-    )
-    try:
-        with st.spinner("Loading NBA schedule and box scores…"):
-            team_stats, logs = load_from_boxscores(season, season_type, game_date)
-    except Exception as e:
-        st.error(f"Could not load team or player stats.\n\n- stats.nba.com: {stats_err}\n- cdn.nba.com: {e}")
-        st.subheader("Schedule")
-        st.dataframe(sched[["tip_et", "away", "home", "status", "mkt_details", "mkt_total"]], hide_index=True)
-        st.stop()
-    if team_stats.empty or logs.empty:
-        st.error("No finished games found to build ratings from.")
-        st.stop()
+    for src in ("cdn", "espn"):
+        label = BOX_SOURCES[src][0]
+        try:
+            with st.spinner(f"Loading {label}…"):
+                team_stats, logs = load_from_boxscores(src, season, season_type, game_date)
+            data_source = label
+            break
+        except Exception as e:
+            source_errors[label] = str(e)
+            team_stats = logs = None
 
-# Use only games played before the slate date (no look-ahead when viewing past slates).
-logs = logs[logs["GAME_DATE"] < game_date]
-lg = league_baselines(team_stats)
-
-for note in st.session_state.get("stale_notes", {}).values():
-    st.warning(note)
-
-# ---- Project the slate ---------------------------------------------------
+projections: dict[str, dict] = {}
 pools: dict[str, tuple[pd.DataFrame, dict]] = {}
+lg: dict = {}
+if team_stats is not None:
+    try:
+        logs = logs[logs["GAME_DATE"] < game_date]  # no look-ahead on past slates
+        lg = league_baselines(team_stats)
+    except Exception as e:
+        source_errors["model"] = str(e)
+        team_stats = None
 
 
 def team_pool(abbr: str):
     if abbr not in pools:
-        pools[abbr] = build_team_pool(logs, abbr, injuries, q_sit_prob)
+        try:
+            pools[abbr] = build_team_pool(logs, abbr, injuries, q_sit_prob)
+        except Exception:
+            pools[abbr] = (pd.DataFrame(), {"team_games": 0, "team_ppg": np.nan, "lost_pts_season": 0.0,
+                                            "lost_min_season": 0.0, "lost_pts_recent": 0.0, "lost_min_recent": 0.0,
+                                            "lost_reb_recent": 0.0, "lost_ast_recent": 0.0})
     return pools[abbr]
 
 
-slate_rows, projections = [], {}
-for g in sched.itertuples():
-    if g.home not in team_stats.index or g.away not in team_stats.index:
-        continue
-    pool_h, meta_h = team_pool(g.home)
-    pool_a, meta_a = team_pool(g.away)
-    proj = project_game(g.home, g.away, team_stats, lg, b2b_teams, meta_h, meta_a)
-    projections[g.game_id] = proj
-    score = f"{g.away_score}-{g.home_score}" if g.state in ("in", "post") else ""
-    slate_rows.append(
-        {
-            "Tip (ET)": g.tip_et.strftime("%I:%M %p").lstrip("0") if pd.notna(g.tip_et) else "",
-            "Matchup": f"{g.away} @ {g.home}",
-            "Status": f"{g.status} {score}".strip(),
-            "B2B": ", ".join(t for t in (g.away, g.home) if t in b2b_teams) or "-",
-            "Proj Score": f"{proj['pts_away']:.0f}-{proj['pts_home']:.0f}",
-            "Proj Spread (Home)": fmt_spread(proj["spread_home"]),
-            "Market Spread": fmt_spread(g.mkt_spread_home),
-            "Spread Edge": fmt_spread(g.mkt_spread_home - proj["spread_home"]) if g.mkt_spread_home is not None else "-",
-            "Proj Total": round(proj["total"], 1),
-            "Market Total": g.mkt_total if g.mkt_total is not None else "-",
-            "Total Edge": f"{proj['total'] - g.mkt_total:+.1f}" if g.mkt_total is not None else "-",
-            "Home Win %": f"{proj['home_win_prob'] * 100:.0f}%",
-        }
-    )
+if team_stats is not None:
+    for g in sched.itertuples():
+        try:
+            if g.home in team_stats.index and g.away in team_stats.index:
+                projections[g.game_id] = project_game(g.home, g.away, team_stats, lg, b2b_teams,
+                                                      team_pool(g.home)[1], team_pool(g.away)[1])
+        except Exception as e:
+            source_errors[f"{g.away}@{g.home}"] = str(e)
 
-st.subheader(f"Slate — {game_date:%A, %B %d, %Y}")
-st.caption(
-    f"Team ratings: {stats_season} {season_type} via {data_source} · League avg pace {lg['pace']:.1f}, ORtg {lg['rtg']:.1f} · "
-    "Spread edge > 0 means the model likes the home side vs. the market; total edge > 0 leans over."
-)
-st.dataframe(pd.DataFrame(slate_rows), hide_index=True, width="stretch")
+tab_picks, tab_props, tab_inj = st.tabs(["🎯 Game Picks", "📊 Player Props", "🩹 Injury Report"])
 
-# ---- Game detail ---------------------------------------------------------
-games = [g for g in sched.itertuples() if g.game_id in projections]
-if not games:
-    st.stop()
-labels = {g.game_id: f"{g.away_name} @ {g.home_name} — {g.status}" for g in games}
-gid = st.selectbox("Game detail", list(labels), format_func=labels.get)
-g = next(x for x in games if x.game_id == gid)
-proj = projections[gid]
+# ---- Game Picks ----------------------------------------------------------
+with tab_picks:
+    if team_stats is None:
+        H('<div class="card"><b>Projections unavailable right now.</b><div class="note">'
+          + "<br>".join(f"{esc(k)}: {esc(v)}" for k, v in source_errors.items())
+          + "<br>Matchups and market lines are shown below; tap Refresh in Settings to retry.</div></div>")
+    else:
+        H('<div class="note">Model line vs. market. Spread badge names the side the model likes; '
+          'total badge shows over/under lean. Number = points of edge.</div>')
 
-c1, c2, c3, c4 = st.columns(4)
-c1.metric(f"{g.home} spread", fmt_spread(proj["spread_home"]),
-          help=f"Market: {g.mkt_details or 'n/a'}")
-c2.metric("Total", f"{proj['total']:.1f}",
-          delta=f"{proj['total'] - g.mkt_total:+.1f} vs market" if g.mkt_total is not None else None)
-c3.metric(f"{g.home} win prob", f"{proj['home_win_prob'] * 100:.0f}%")
-c4.metric("Projected possessions", f"{proj['poss']:.1f}")
+    for g in sched.itertuples():
+        p = projections.get(g.game_id)
+        state = g.state
+        if state == "in":
+            st_pill = f'<span class="pill live">● {esc(g.status)}</span>'
+        elif state == "post":
+            st_pill = f'<span class="pill final">{esc(g.status)}</span>'
+        else:
+            st_pill = ""
+        tags = "".join(f'<span class="pill b2b">{esc(t)} B2B</span>' for t in (g.away, g.home) if t in b2b_teams)
+        tip = g.tip_et.strftime("%-I:%M %p ET") if pd.notna(g.tip_et) else ""
 
-tab_game, tab_props, tab_logs = st.tabs(["Team factors & injuries", "Player props", "Last-10 game logs"])
+        def trow(abbr, short, rec, logo, score, proj_pts):
+            sc = f'<div class="tscore">{esc(str(score))}</div>' if state in ("in", "post") and score not in (None, "") else ""
+            pj = (f'<div class="tproj"><span class="lbl">Proj</span><span class="num">{proj_pts:.0f}</span></div>'
+                  if proj_pts is not None else "")
+            return (f'<div class="trow">{logo_html(logo, abbr)}<div class="tinfo"><div class="tabbr">{esc(abbr)}'
+                    f'<span class="rec">{esc(rec or "")}</span></div><div class="tname">{esc(short)}</div></div>'
+                    f'{sc}{pj}</div>')
 
-with tab_game:
-    rows = []
-    for side, abbr in (("Away", g.away), ("Home", g.home)):
-        r = team_stats.loc[abbr]
-        meta = team_pool(abbr)[1]
-        rows.append(
-            {
-                "Side": side,
-                "Team": abbr,
-                "Record": f"{int(r['W'])}-{int(r['L'])}",
-                "Pace": round(r["PACE"], 1),
-                "OffRtg": round(r["OFF_RATING"], 1),
-                "DefRtg": round(r["DEF_RATING"], 1),
-                "NetRtg": round(r["NET_RATING"], 1),
-                "Back-to-back": "Yes" if abbr in b2b_teams else "No",
-                "Injury-weighted PPG missing": round(meta["lost_pts_season"], 1),
-                "Adj. matchup ORtg": round(proj["ortg_home" if side == "Home" else "ortg_away"], 1),
-                "Proj PTS": round(proj["pts_home" if side == "Home" else "pts_away"], 1),
-            }
-        )
-    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+        body = (f'<div class="card"><div class="ghead"><div class="gtime">{esc(tip)}</div>'
+                f'<div class="tags">{tags}{st_pill}</div></div>'
+                + trow(g.away, g.away_short, g.away_record, g.away_logo, g.away_score, p["pts_away"] if p else None)
+                + trow(g.home, g.home_short, g.home_record, g.home_logo, g.home_score, p["pts_home"] if p else None))
+        if p:
+            hp = p["home_win_prob"] * 100
+            body += (f'<div class="winbar"><div class="a" style="width:{100 - hp:.0f}%"></div>'
+                     f'<div class="h" style="width:{hp:.0f}%"></div></div>'
+                     f'<div class="winlbl"><span>{esc(g.away)} {100 - hp:.0f}%</span>'
+                     f'<span>{esc(g.home)} {hp:.0f}%</span></div>')
+            mkt_s, mkt_t = g.mkt_spread_home, g.mkt_total
+            has_s = mkt_s is not None and not (isinstance(mkt_s, float) and np.isnan(mkt_s))
+            has_t = mkt_t is not None and not (isinstance(mkt_t, float) and np.isnan(mkt_t))
+            s_edge = (mkt_s - p["spread_home"]) if has_s else None
+            s_badge = edge_badge(s_edge, 1.5, 3.0,
+                                 f"{g.home} {fmt_spread(mkt_s)}" if has_s else "",
+                                 f"{g.away} {fmt_spread(-mkt_s)}" if has_s else "")
+            t_edge = (p["total"] - mkt_t) if has_t else None
+            t_badge = edge_badge(t_edge, 2.0, 5.0, f"OVER {mkt_t}" if has_t else "",
+                                 f"UNDER {mkt_t}" if has_t else "", neg_is_red=True)
+            fav = g.home if p["home_win_prob"] >= 0.5 else g.away
+            body += (
+                '<div class="mkts">'
+                f'<div class="mkt"><span class="lbl">Spread</span><div class="val">'
+                f'{esc(fav_line(p["spread_home"], g.home, g.away))}</div>'
+                f'<div class="sub">Mkt {esc(g.mkt_details or "—")}</div>{s_badge}</div>'
+                f'<div class="mkt"><span class="lbl">Total</span><div class="val">{p["total"]:.1f}</div>'
+                f'<div class="sub">Mkt {esc(str(mkt_t) if has_t else "—")}</div>{t_badge}</div>'
+                f'<div class="mkt"><span class="lbl">Win</span><div class="val">{esc(fav)} '
+                f'{max(hp, 100 - hp):.0f}%</div><div class="sub">{p["poss"]:.0f} poss</div>'
+                f'<span class="badge muted">MODEL</span></div>'
+                '</div>'
+            )
+        elif team_stats is not None:
+            body += '<div class="empty">No projection: team ratings missing for this matchup.</div>'
+        body += "</div>"
+        H(body)
 
-    ic1, ic2 = st.columns(2)
-    for col, abbr in ((ic1, g.away), (ic2, g.home)):
-        with col:
-            st.markdown(f"**{abbr} injury report (ESPN)**")
-            ti = injuries[injuries["team"] == abbr] if not injuries.empty else injuries
-            if ti.empty:
-                st.caption("No players listed.")
-            else:
-                st.dataframe(ti[["player", "status", "detail"]], hide_index=True, width="stretch")
+# ---- Player Props --------------------------------------------------------
+PROP_EDGE = {"PTS": (1.5, 3.0), "REB": (0.8, 1.6), "AST": (0.8, 1.6), "PRA": (2.0, 4.0)}
 
 with tab_props:
-    for abbr, opp in ((g.away, g.home), (g.home, g.away)):
-        pool, meta = team_pool(abbr)
-        props = project_players(logs, pool, meta, abbr, opp, team_stats, lg, proj["poss"], abbr in b2b_teams)
-        st.markdown(f"#### {abbr} vs {opp}" + ("  ·  back-to-back" if abbr in b2b_teams else ""))
-        if meta["lost_min_recent"] > 0:
-            st.caption(
-                f"Absent-teammate adjustment: {meta['lost_min_recent']:.0f} min, "
-                f"{meta['lost_pts_recent']:.1f} pts, {meta['lost_reb_recent']:.1f} reb, "
-                f"{meta['lost_ast_recent']:.1f} ast per game redistributed."
-            )
+    games = [g for g in sched.itertuples() if g.game_id in projections]
+    if not games:
+        H('<div class="card"><b>Player props need team ratings and game logs, which are unavailable right now.</b>'
+          '<div class="note">Tap Refresh in Settings to retry.</div></div>')
+    else:
+        labels = {g.game_id: f"{g.away} @ {g.home}" + (f"  ·  {g.tip_et:%-I:%M %p}" if pd.notna(g.tip_et) else "")
+                  for g in games}
+        gid = st.selectbox("Game", list(labels), format_func=labels.get, label_visibility="collapsed")
+        g = next(x for x in games if x.game_id == gid)
+        stat = st.radio("Market", ["PTS", "REB", "AST", "PRA"], horizontal=True, label_visibility="collapsed")
+        side = st.radio("Team", ["Both", g.away, g.home], horizontal=True, label_visibility="collapsed")
+        H('<div class="note">Edge = projection vs. last-5 average (free data sources publish no sportsbook '
+          'prop lines). Chips show the last 5 games, green when above the model line. '
+          'Hit = share of last 10 games over the model line.</div>')
+
+        frames = []
+        for abbr, opp in ((g.away, g.home), (g.home, g.away)):
+            if side not in ("Both", abbr):
+                continue
+            try:
+                pool, meta = team_pool(abbr)
+                df = project_players(logs, pool, meta, abbr, opp, team_stats, lg, projections[gid]["poss"],
+                                     abbr in b2b_teams)
+                if not df.empty:
+                    frames.append(df)
+            except Exception as e:
+                H(f'<div class="card"><div class="empty">Could not project {esc(abbr)} players: {esc(str(e))}</div></div>')
+        props = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
         if props.empty:
-            st.caption("No rotation players with recent game logs.")
-            continue
-        show = props.drop(columns=["_pid"])
-        num_cols = [c for c in show.columns if c not in ("Player", "Status")]
-        st.dataframe(
-            show.style.format({c: "{:.1f}" for c in num_cols}).format(
-                {c: "{:.0f}%" for c in num_cols if c.endswith("Over%")}
-            ),
-            hide_index=True,
-            width="stretch",
-        )
+            H('<div class="card"><div class="empty">No rotation players with recent game logs.</div></div>')
+        else:
+            props["_edge"] = props[f"Proj {stat}"] - props[f"L5 {stat}"]
+            props = props.reindex(props["_edge"].abs().sort_values(ascending=False).index)
+            lean, strong = PROP_EDGE[stat]
+            for r in props.to_dict("records"):
+                line = r[f"{stat} Line"]
+                chips = "".join(f'<span class="chip {"o" if v > line else "u"}">{v:.0f}</span>'
+                                for v in r[f"L5 {stat} vals"])
+                badge = edge_badge(r["_edge"], lean, strong, "▲ OVER", "▼ UNDER", neg_is_red=True)
+                pill = status_pill(r["Class"], r["Status"])
+                b2b = '<span class="pill b2b">B2B</span>' if r["Team"] in b2b_teams else ""
+                H(
+                    f'<div class="card"><div class="phead"><div><div class="pname">{esc(r["Player"])}</div>'
+                    f'<div class="psub">{esc(r["Team"])} vs {esc(r["Opp"])} · {r["Proj MIN"]:.0f} min proj '
+                    f'{pill} {b2b}</div></div>{badge}</div>'
+                    '<div class="pgrid">'
+                    f'<div class="pbox hl"><span class="lbl">Proj {stat}</span><div class="num">{r[f"Proj {stat}"]:.1f}</div></div>'
+                    f'<div class="pbox"><span class="lbl">Model line</span><div class="num">{line:.1f}</div></div>'
+                    f'<div class="pbox"><span class="lbl">L5 avg</span><div class="num">{r[f"L5 {stat}"]:.1f}</div></div>'
+                    f'<div class="pbox"><span class="lbl">L10 hit</span><div class="num">{r[f"{stat} L10 Over%"]:.0f}%</div></div>'
+                    '</div>'
+                    f'<div class="l5"><span class="lbl" style="margin-right:4px">Last 5</span>{chips}</div>'
+                    '<div class="mini">'
+                    f'<span>PTS <b>{r["Proj PTS"]:.1f}</b> <small>(L5 {r["L5 PTS"]:.1f})</small></span>'
+                    f'<span>REB <b>{r["Proj REB"]:.1f}</b> <small>(L5 {r["L5 REB"]:.1f})</small></span>'
+                    f'<span>AST <b>{r["Proj AST"]:.1f}</b> <small>(L5 {r["L5 AST"]:.1f})</small></span>'
+                    '</div></div>'
+                )
 
-with tab_logs:
-    opts = []
-    for abbr in (g.away, g.home):
-        pool, _ = team_pool(abbr)
-        if not pool.empty:
-            opts += [(abbr, r.PLAYER_ID, r.PLAYER) for r in pool.sort_values("L10_MIN", ascending=False).itertuples()]
-    if opts:
-        sel = st.selectbox("Player", opts, format_func=lambda o: f"{o[2]} ({o[0]})")
-        pl = logs[logs["PLAYER_ID"] == sel[1]].sort_values("GAME_DATE", ascending=False).head(10)
-        cols = [c for c in ["GAME_DATE", "MATCHUP", "WL", "MIN", "PTS", "REB", "AST", "FG3M", "PLUS_MINUS"] if c in pl]
-        st.dataframe(pl[cols], hide_index=True, width="stretch")
+# ---- Injury Report -------------------------------------------------------
+CLASS_ORDER = {"OUT": 0, "Q": 1, "ACTIVE": 2}
 
-with st.expander("Methodology"):
+with tab_inj:
+    if injury_note:
+        H(f'<div class="note">{esc(injury_note)}</div>')
+    H(f'<div class="note">ESPN injury report · Questionable/Day-to-Day players are treated as sitting '
+      f'{q_sit_prob:.0%} of the time in projections (change in Settings).</div>')
+    for g in sched.itertuples():
+        for abbr, short, logo in ((g.away, g.away_short, g.away_logo), (g.home, g.home_short, g.home_logo)):
+          try:
+            ti = injuries[injuries["team"] == abbr].copy() if not injuries.empty else pd.DataFrame()
+            ppg = {}
+            if team_stats is not None:
+                pool = team_pool(abbr)[0]
+                if not pool.empty:
+                    ppg = dict(zip(pool["KEY"], pool["SEASON_PTS_TEAM"]))
+            n_out = 0 if ti.empty else int((ti["status"].map(injury_class) == "OUT").sum())
+            head_pill = (f'<span class="pill out">{n_out} out</span>' if n_out
+                         else '<span class="pill ok">Healthy</span>' if ti.empty else "")
+            rows = ""
+            if not ti.empty:
+                ti["cls"] = ti["status"].map(injury_class)
+                ti = ti.sort_values("cls", key=lambda s: s.map(CLASS_ORDER))
+                for r in ti.itertuples():
+                    cls = r.cls
+                    pill_cls = {"OUT": "out", "Q": "q"}.get(cls, "ok")
+                    extra = f" · {ppg[r.key]:.1f} PPG" if r.key in ppg and ppg[r.key] > 0 else ""
+                    rows += (f'<div class="irow"><div class="who"><div class="nm">{esc(r.player)}'
+                             f'<small style="color:var(--muted);font-weight:500">{esc(extra)}</small></div>'
+                             f'<div class="dt">{esc(r.detail or "")}</div></div>'
+                             f'<span class="pill {pill_cls}">{esc(r.status or "")}</span></div>')
+            else:
+                rows = '<div class="empty">No players listed.</div>'
+            H(f'<div class="card"><div class="ihead">{logo_html(logo, abbr)}<div class="tinfo">'
+              f'<div class="tabbr">{esc(abbr)}</div><div class="tname">{esc(short)} · vs '
+              f'{esc(g.home if abbr == g.away else g.away)}</div></div>{head_pill}</div>{rows}</div>')
+          except Exception as e:
+            H(f'<div class="card"><div class="empty">{esc(abbr)} injury report unavailable: {esc(str(e))}</div></div>')
+
+# ---- Footer --------------------------------------------------------------
+notes = list(st.session_state.get("stale_notes", {}).values())
+if data_source:
+    src_line = f"Ratings & game logs: {data_source}"
+    if stats_season != season and data_source.startswith("stats"):
+        src_line += f" ({stats_season} season — no {season} games yet)"
+    notes.insert(0, src_line)
+for k, v in source_errors.items():
+    if team_stats is not None:
+        notes.append(f"{k} skipped: {v}")
+notes.append(f"Updated {now_et:%b %d, %-I:%M %p} ET · Estimates only, not betting advice.")
+H('<div class="note" style="margin-top:8px">' + "<br>".join(esc(n) for n in notes) + '</div>')
+
+with st.expander("How the model works"):
     st.markdown(
         f"""
-**Game model**
-- Possessions = Pace_home × Pace_away / League pace (−0.5 per team on a back-to-back).
-- Matchup ORtg = Team OffRtg × Opp DefRtg / League rating, ±{HOME_COURT_RTG} per 100 for home court.
-- Injuries: each Out (or Questionable × sit-probability) player's season scoring, weighted by the share of
-  team games they played, lowers team OffRtg by {INJ_OFF_FACTOR:.0%} of the missing scoring share and raises
-  DefRtg by {INJ_DEF_PER_MIN_SHARE} × missing minute share (season ratings only include them in games they played).
-- Back-to-back: −{B2B_OFF_PENALTY} OffRtg, +{B2B_DEF_PENALTY} DefRtg (detected from the previous day's ESPN schedule).
-- Spread = −(home pts − away pts); win probability uses a normal margin with σ = {MARGIN_SD}.
+**Games** — Possessions = Pace_home × Pace_away / league pace. Matchup rating = OffRtg × opponent DefRtg /
+league average, ±{HOME_COURT_RTG} per 100 for home court. Missing players (Out, or Questionable × sit chance)
+lower OffRtg and raise DefRtg in proportion to their scoring and minutes. Back-to-backs cost
+{B2B_OFF_PENALTY} OffRtg and {B2B_DEF_PENALTY} DefRtg. Win probability uses a normal margin, σ = {MARGIN_SD}.
 
-**Player props**
-- Recency-weighted last-10 per-minute PTS/REB/AST × projected minutes.
-- Minutes: last-10 average plus a proportional share of absent teammates' recent minutes (capped at {MAX_PLAYER_MIN:.0f}),
-  ×{B2B_MIN_FACTOR} on a back-to-back.
-- Pace factor = game possessions / team pace. Opponent factor: PTS by opp DefRtg; REB/AST by opp
-  rebounds/assists allowed per possession, each relative to league average.
-- Teammate usage bump from missing scoring/rebounding/assists of absent teammates.
-- Lines are rounded to the nearest .5; "L10 Over%" is how often the player cleared that line in their last 10.
+**Props** — Recency-weighted last-10 per-minute PTS/REB/AST × projected minutes (absent teammates' minutes
+redistributed, capped at {MAX_PLAYER_MIN:.0f}), adjusted for game pace, opponent DefRtg (PTS) and opponent
+rebounds/assists allowed per possession, a usage bump when teammates are out, and back-to-back fatigue.
+
+**Data** — ESPN: schedule, scores, market lines, injuries. Team ratings and player logs: stats.nba.com via
+nba_api, falling back to NBA box scores on cdn.nba.com and then ESPN box scores when a source is blocked.
 """
     )
-
-st.caption(f"Rendered {now_et:%Y-%m-%d %I:%M %p} ET. Projections are estimates, not betting advice.")
