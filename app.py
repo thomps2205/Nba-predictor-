@@ -732,8 +732,7 @@ def leg_html(l: parlays.Leg, show_edge: bool = False) -> str:
 
 def parlay_card(pl: dict) -> str:
     ev = pl["ev"] * 100
-    tag_cls = {"SAFE": "strong", "VALUE": "lean", "LONGSHOT": "muted", "MIXED": "strong",
-               "6-LEG": "under-lean"}.get(pl["tag"], "lean")
+    tag_cls = {"SAFE": "strong", "VALUE": "lean", "LONGSHOT": "muted", "MIXED": "strong"}.get(pl["tag"], "lean")
     sports = sorted({l.sport for l in pl["legs"]})
     return (f'<div class="card"><div class="ghead"><div class="pl-title">{esc(pl["title"])}'
             f'<div class="psub">{len(pl["legs"])} legs · {esc(" + ".join(sports))}</div></div>'
