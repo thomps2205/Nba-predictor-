@@ -1,44 +1,41 @@
-# NBA Game & Player Prop Predictor
+# Sharp Board: NBA · NCAAB · NFL · NHL · UFC predictor
 
-A Streamlit app that projects spreads, totals, win probabilities and player PTS / REB / AST / PRA lines
-for any NBA slate. It uses only live data and no mock values.
+A mobile-first, sportsbook-style Streamlit app. It projects spreads, totals, win probabilities and player
+props for the NBA, men's college basketball, NFL and NHL. It also projects UFC fight cards, with win
+probability and method of victory. All data is live; nothing is mocked.
 
-| Data | Source |
+## Data sources
+
+ESPN's public JSON is the primary source for every sport:
+
+| Data | Endpoint |
 |---|---|
-| Daily schedule, live status/scores, market spread & total | ESPN public scoreboard JSON |
-| Injury report | ESPN public injuries JSON |
-| Back-to-back detection | ESPN scoreboard for the previous day |
-| Team Pace / OffRtg / DefRtg, opponent REB/AST allowed | `nba_api` → `LeagueDashTeamStats` (Advanced + Opponent) |
-| Player last-10 game logs & current rosters | `nba_api` → `LeagueGameLog` (players) |
-| Fallback when stats.nba.com is unreachable | `nba_api` live box scores + season schedule on cdn.nba.com |
-| Second fallback when cdn.nba.com is unreachable | ESPN scoreboard (completed games) + ESPN game summaries (box scores) |
+| Schedules, live scores, betting lines, rankings | `site.api.espn.com/apis/site/v2/sports/{sport}/{league}/scoreboard` (`groups=50&limit=500` for D1 college basketball) |
+| Team form (points for/against) | `…/teams/{id}/schedule` |
+| Basketball possessions (pace) | `…/teams/{id}/statistics` |
+| Rosters and headshots | `…/teams/{id}/roster` |
+| Player game logs | `site.web.api.espn.com/apis/common/v3/sports/{sport}/{league}/athletes/{id}/gamelog` |
+| Injuries (NBA, NFL, NHL) | `…/{league}/injuries` |
+| UFC fight cards and fighter profiles | `…/mma/ufc/scoreboard`, `site.web.api.espn.com/apis/common/v3/sports/mma/athletes/{id}` |
 
-All requests send browser-style headers, are spaced at least 0.6 s apart, retry on failure, and are cached
-as JSON in `./.cache` (schedule 2 min, injuries 15 min, game logs 2 h, team stats 6 h). If a source is down,
-the last cached copy is used and the app shows a warning.
+For the NBA only, `nba_api` (stats.nba.com advanced Pace/OffRtg/DefRtg) is an optional enrichment. It runs
+inside a strict try/except with a 5-second timeout. If it fails, it is skipped for 6 hours and the
+ESPN-derived ratings are used. The app no longer calls cdn.nba.com at all.
 
-stats.nba.com often silently drops requests from cloud hosts such as Streamlit Community Cloud. The app
-waits at most 10 s, then skips stats.nba.com for 30 min. In that case it computes Pace, OffRtg, DefRtg,
-opponent REB/AST and player game logs itself from the official box scores on cdn.nba.com. The first load
-downloads every finished game, showing a progress bar for a few minutes. Those box scores are cached, so
-later loads only fetch new games.
+Every request sends browser-style headers and waits at least 0.6 s after the previous one. Responses are
+cached as JSON in `./.cache`:
 
-If cdn.nba.com fails too, the app builds the same numbers from ESPN game summaries. If every stats source
-fails, matchups, market lines and injuries still render, and projections show as unavailable instead of
-crashing the page.
+| Data | Cached for |
+|---|---|
+| Scoreboards | 2 min |
+| Injuries | 15 min |
+| Team schedules | 3 h |
+| Game logs | 4 h |
+| Rosters, team stats | 6 h |
+| Fighters | 24 h |
 
-## Interface
-
-The page is a mobile-first dark layout with three tabs:
-
-* **Game Picks** shows a matchup card per game: projected score, win-probability bar, and model spread, total
-  and win % with edge badges against the market line.
-* **Player Props** shows a card per rotation player for PTS / REB / AST / PRA: projection, model line, last-5
-  average, last-5 chips, last-10 hit rate, and an OVER / UNDER badge (projection vs. last-5 average).
-* **Injury Report** shows ESPN's injury list for every team on the slate, colour-coded by status, with
-  each player's PPG.
-
-Settings (date, season, questionable-sit probability, refresh) live in the collapsible panel at the top.
+Data that isn't cached yet loads behind a progress bar. If an endpoint fails, the last cached copy is
+used. If nothing is cached, that card says so instead of the page crashing.
 
 ## Run
 
@@ -47,20 +44,36 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Use the sidebar to pick the slate date, season, season type, and how likely Questionable / Day-to-Day
-players are to sit. **Refresh all data** clears the cache. When you view a past date, only game logs from
-before that date are used.
+## Interface
 
-## Model (summary)
+* **Sport switcher** across the top: NBA, NCAAB, NFL, NHL, UFC. For NCAAB there is also a Top 25 / All D1
+  toggle; long slates are paged.
+* **Matchups** shows team cards with the projected score, a win-probability bar, and edge badges against
+  ESPN's market lines:
+  * NBA, NCAAB, NFL: spread, total and moneyline.
+  * NHL: puck line, total and moneyline.
+* **Player Props** has a card per player with headshot, projection, model line, last-5 average, last-5
+  chips, last-10 hit rate and an OVER/UNDER badge. Switching market or team redraws only the cards. Markets:
+  * Basketball: PTS / REB / AST / PRA.
+  * NFL: passing, rushing and receiving yards, and receptions.
+  * NHL: goals (with anytime-goal %), assists, shots and points.
+* **Injuries** (NBA, NFL, NHL) shows ESPN's report for every team on the slate.
+* **UFC:**
+  * **Fight Card** lists every bout from the main event down to the prelims, with records, odds, win
+    probability, the pick and the predicted method (KO/TKO, Submission, Decision).
+  * **Fight Breakdowns** shows a tale of the tape (age, height, reach, stance, striking and grappling rates),
+    method-of-victory bars, and the model factors.
 
-* **Possessions** = Pace_home × Pace_away / league pace, minus 0.5 per team on a back-to-back.
-* **Matchup ORtg** = OffRtg × opponent DefRtg / league rating, ±1.0 per 100 possessions for home court.
-* **Injuries**: each missing player's scoring and minutes, weighted by how often they actually played,
-  lower the team's OffRtg and raise its DefRtg.
-* **Back-to-backs**: −1.2 OffRtg, +1.0 DefRtg, and fewer minutes / slightly lower efficiency for players.
-* **Player props**: recency-weighted last-10 per-minute rates × projected minutes. Absent teammates' minutes
-  are redistributed, and each player is adjusted for game pace, opponent DefRtg (PTS), opponent
-  rebounds / assists allowed per possession (REB / AST), and a usage bump. Lines are rounded to the
-  nearest .5 and come with the player's last-10 hit rate.
+## Code layout
+
+```
+app.py            UI (sport switcher, tabs, cards)
+engine/common.py  throttled HTTP, disk cache, parsing helpers
+engine/espn.py    ESPN endpoints + tolerant parsers
+engine/teams.py   team ratings + per-sport game models (and optional nba_api ratings)
+engine/props.py   player prop models
+engine/ufc.py     fight cards, fighter profiles, win-probability and method model
+engine/ui.py      CSS + HTML helpers
+```
 
 Projections are estimates for entertainment and research, not betting advice.
