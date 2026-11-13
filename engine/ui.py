@@ -144,9 +144,23 @@ div[data-testid="stButtonGroup"]{gap:6px}
 justify-content:center;overflow:hidden}
 .lglogo span{font-size:.95rem}
 .lglogo .lg-img{position:absolute;inset:3px;background-size:contain;background-position:center;background-repeat:no-repeat}
+.lg-vis{position:relative;width:48px;height:48px;flex:none;margin:2px 4px 0 0}
+.lg-vis .tm{position:relative;width:48px;height:48px;border-radius:13px;background:#f4f6f8;display:flex;
+align-items:center;justify-content:center;overflow:hidden}
+.lg-vis .tm span{font-size:.6rem;font-weight:800;color:#475569;text-align:center;line-height:1.1;padding:0 2px}
+.lg-vis .tm .im{position:absolute;inset:5px;background-size:contain;background-position:center;background-repeat:no-repeat}
+.lg-vis .tm.two .im.a{inset:3px 17px 17px 3px}
+.lg-vis .tm.two .im.b{inset:17px 3px 3px 17px}
+.lg-vis .tm.photo{border-radius:50%;background:linear-gradient(145deg,#1f2a37,#121821);border:2px solid var(--line)}
+.lg-vis .tm.photo span{color:var(--muted)}
+.lg-vis .tm.photo .im{inset:0;background-size:cover;background-position:center 15%}
+.lg-vis .lgb{position:absolute;right:-7px;bottom:-7px;border:2px solid var(--card);border-radius:8px;line-height:0}
+.lg-vis .lgb .lglogo{border-radius:6px}
+.lg-vis .lgb .lglogo span{font-size:.6rem}
+.lg-when{color:var(--muted);font-size:.78rem;margin-top:3px}
 .lg-main{flex:1;min-width:0}
-.lg-pick{font-weight:800;font-size:1.05rem;line-height:1.25;color:var(--text)}
-.lg-sub{color:var(--muted);font-size:.8rem;line-height:1.4;margin-top:4px}
+.lg-pick{font-weight:800;font-size:1.08rem;line-height:1.25;color:var(--text)}
+.lg-sub{color:#c3ccd8;font-size:.85rem;line-height:1.4;margin-top:5px}
 .lg-sub .mk{display:inline-block;font-size:.62rem;font-weight:800;padding:2px 7px;border-radius:6px;
 background:var(--card2);border:1px solid var(--line);color:var(--text);margin-right:6px;letter-spacing:.04em;
 text-transform:uppercase;vertical-align:1px}

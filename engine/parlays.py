@@ -43,6 +43,10 @@ class Leg:
     when: str = ""
     note: str = ""
     mkt: float | None = None   # market's no-vig probability for this side (None = already blended)
+    logo: str = ""             # picked team's logo / fighter photo
+    logo2: str = ""            # second logo (totals show both teams)
+    fallback: str = ""         # text shown if the image can't load
+    photo: bool = False        # round photo (UFC) instead of a logo tile
     model: float = field(init=False)
     implied: float = field(init=False)
     edge: float = field(init=False)
@@ -86,6 +90,11 @@ def _hockey_probs(lh: float, la: float, line_total: float | None) -> tuple[float
     return p_home + 0.52 * tie, (p_over if line_total is not None else None)
 
 
+def _name(t: dict) -> str:
+    """Friendly team name for a pick: short display name (e.g. 'Hawks', 'Duke'), else the abbreviation."""
+    return t.get("short") or t["abbr"]
+
+
 def game_legs(sport: str, kind: str, games: list[dict], projections: dict) -> list[Leg]:
     legs: list[Leg] = []
     for g in games:
@@ -93,32 +102,38 @@ def game_legs(sport: str, kind: str, games: list[dict], projections: dict) -> li
         if not p or g["state"] != "pre":
             continue
         h, a, o = g["home"], g["away"], g["odds"]
-        matchup = f'{a["abbr"]} @ {h["abbr"]}'
+        matchup = f'{_name(a)} @ {_name(h)}'
         when = g["tip"].strftime("%a %-I:%M %p") if g["tip"] is not None else ""
+
+        def leg(pick, market, prob, dec, mkt, team=None):
+            if team is not None:
+                return Leg(sport, g["id"], matchup, pick, market, prob, dec, when, mkt=mkt,
+                           logo=team.get("logo", ""), fallback=team["abbr"])
+            return Leg(sport, g["id"], matchup, pick, market, prob, dec, when, mkt=mkt,
+                       logo=a.get("logo", ""), logo2=h.get("logo", ""), fallback=f'{a["abbr"]}/{h["abbr"]}')
+
         cands: list[Leg] = []
         if kind == "hockey":
             win_h, p_over = _hockey_probs(p["pts_home"], p["pts_away"], o["total"])
             if p_over is not None:
-                cands += [Leg(sport, g["id"], matchup, f'Over {o["total"]}', "Total", p_over, STD_DEC, when, mkt=0.5),
-                          Leg(sport, g["id"], matchup, f'Under {o["total"]}', "Total", 1 - p_over, STD_DEC, when, mkt=0.5)]
+                cands += [leg(f'Over {o["total"]} goals', "Total", p_over, STD_DEC, 0.5),
+                          leg(f'Under {o["total"]} goals', "Total", 1 - p_over, STD_DEC, 0.5)]
         else:
             win_h = p["home_win_prob"]
             mu = -p["spread_home"]  # projected home margin
             if o["spread_home"] is not None:
                 p_cover_h = 1 - norm_cdf((-o["spread_home"] - mu) / MARGIN_SD[sport])
-                cands += [Leg(sport, g["id"], matchup, f'{h["abbr"]} {o["spread_home"]:+.1f}', "Spread", p_cover_h,
-                              STD_DEC, when, mkt=0.5),
-                          Leg(sport, g["id"], matchup, f'{a["abbr"]} {-o["spread_home"]:+.1f}', "Spread",
-                              1 - p_cover_h, STD_DEC, when, mkt=0.5)]
+                cands += [leg(f'{_name(h)} {o["spread_home"]:+.1f}', "Spread", p_cover_h, STD_DEC, 0.5, h),
+                          leg(f'{_name(a)} {-o["spread_home"]:+.1f}', "Spread", 1 - p_cover_h, STD_DEC, 0.5, a)]
             if o["total"] is not None:
                 p_over = 1 - norm_cdf((o["total"] - p["total"]) / TOTAL_SD[sport])
-                cands += [Leg(sport, g["id"], matchup, f'Over {o["total"]}', "Total", p_over, STD_DEC, when, mkt=0.5),
-                          Leg(sport, g["id"], matchup, f'Under {o["total"]}', "Total", 1 - p_over, STD_DEC, when, mkt=0.5)]
+                cands += [leg(f'Over {o["total"]}', "Total", p_over, STD_DEC, 0.5),
+                          leg(f'Under {o["total"]}', "Total", 1 - p_over, STD_DEC, 0.5)]
         dh, da = american_to_dec(o["ml_home"]), american_to_dec(o["ml_away"])
         if dh and da:
             mh = (1 / dh) / (1 / dh + 1 / da)  # no-vig
-            cands += [Leg(sport, g["id"], matchup, f'{h["abbr"]} ML', "ML", win_h, dh, when, mkt=mh),
-                      Leg(sport, g["id"], matchup, f'{a["abbr"]} ML', "ML", 1 - win_h, da, when, mkt=1 - mh)]
+            cands += [leg(f'{_name(h)} to win', "Moneyline", win_h, dh, mh, h),
+                      leg(f'{_name(a)} to win', "Moneyline", 1 - win_h, da, 1 - mh, a)]
         legs += cands
     return legs
 
@@ -128,9 +143,11 @@ def prop_legs(sport: str, kind: str, game: dict, df, book: dict, norm_name, labe
     legs: list[Leg] = []
     if df is None or getattr(df, "empty", True) or game["state"] != "pre":
         return legs
-    matchup = f'{game["away"]["abbr"]} @ {game["home"]["abbr"]}'
+    matchup = f'{_name(game["away"])} @ {_name(game["home"])}'
     when = game["tip"].strftime("%a %-I:%M %p") if game["tip"] is not None else ""
+    by_abbr = {game[s_]["abbr"]: game[s_] for s_ in ("home", "away")}
     for r in df.to_dict("records"):
+        team = by_abbr.get(r.get("Team"), {})
         for m in labels:
             b = book.get((norm_name(r["Player"]), m))
             if not b or f"P_{m}" not in r:
@@ -145,7 +162,8 @@ def prop_legs(sport: str, kind: str, game: dict, df, book: dict, norm_name, labe
                 p_over = 1 - norm_cdf((line - proj) / sd)
             side, prob = ("Over", p_over) if p_over >= 0.5 else ("Under", 1 - p_over)
             legs.append(Leg(sport, game["id"], matchup, f'{r["Player"]} {side} {line:g} {labels[m]}', "Prop", prob,
-                            PROP_DEC, when, note=f"{src} · proj {proj:.1f}", mkt=0.5))
+                            PROP_DEC, when, note=f"{src} line · model {proj:.1f}", mkt=0.5,
+                            logo=team.get("logo", ""), fallback=r.get("Team", "")))
     return legs
 
 
@@ -159,10 +177,15 @@ def ufc_legs(card: dict, bouts: list[dict]) -> list[Leg]:
         da, db = american_to_dec(fa.get("ml")), american_to_dec(fb.get("ml"))
         matchup = f'{x["a"]["name"]} vs {x["b"]["name"]}'
         when = card["start"].strftime("%a %-I:%M %p") if card.get("start") is not None else ""
+        def initials(n):
+            return "".join(w[0] for w in n.split()[:2]).upper()
+
         if da:
-            legs.append(Leg("UFC", b["id"], matchup, f'{x["a"]["name"]} ML', "Fight", pred["p_a"], da, when))
+            legs.append(Leg("UFC", b["id"], matchup, f'{x["a"]["name"]} to win', "Fight", pred["p_a"], da, when,
+                            logo=x["a"].get("headshot", ""), fallback=initials(x["a"]["name"]), photo=True))
         if db:
-            legs.append(Leg("UFC", b["id"], matchup, f'{x["b"]["name"]} ML', "Fight", 1 - pred["p_a"], db, when))
+            legs.append(Leg("UFC", b["id"], matchup, f'{x["b"]["name"]} to win', "Fight", 1 - pred["p_a"], db, when,
+                            logo=x["b"].get("headshot", ""), fallback=initials(x["b"]["name"]), photo=True))
     return legs
 
 

@@ -707,15 +707,26 @@ def breakdown_fragment(bouts: list[dict]) -> None:
 # --------------------------------------------------------------------------
 
 
+def leg_visual(l: parlays.Leg) -> str:
+    """Team logo (both teams for totals, round photo for UFC) with a small league badge in the corner."""
+    def img(url, cls=""):
+        return f'<div class="im {cls}" style="background-image:url(\'{esc(url)}\')"></div>' if url else ""
+
+    inner = (img(l.logo, "a") + img(l.logo2, "b")) if l.logo2 else img(l.logo)
+    cls = "tm two" if l.logo2 else ("tm photo" if l.photo else "tm")
+    return (f'<div class="lg-vis"><div class="{cls}"><span>{esc(l.fallback[:7])}</span>{inner}</div>'
+            f'<div class="lgb">{league_logo_html(l.sport, 20)}</div></div>')
+
+
 def leg_html(l: parlays.Leg, show_edge: bool = False) -> str:
-    sub = " · ".join(x for x in (l.matchup, l.when) if x)
     note_ = f'<div class="lg-note">{esc(l.note)}</div>' if l.note else ""
     edge = (f'<span class="lg-edge">+{l.edge * 100:.1f}% edge at {parlays.dec_to_american(l.dec)}</span>'
             if show_edge else "")
-    return (f'<div class="leg">{league_logo_html(l.sport, 34)}'
+    when = f'<div class="lg-when">🕒 {esc(l.when)} · {esc(l.sport)}</div>' if l.when else ""
+    return (f'<div class="leg">{leg_visual(l)}'
             f'<div class="lg-main"><div class="lg-pick">{esc(l.pick)}</div>'
-            f'<div class="lg-sub"><span class="mk">{esc(l.sport)} · {esc(l.market)}</span>{esc(sub)}</div>'
-            f'{note_}{edge}</div>'
+            f'<div class="lg-sub"><span class="mk">{esc(l.market)}</span>{esc(l.matchup)}</div>'
+            f'{when}{note_}{edge}</div>'
             f'<div class="lg-p"><span class="lbl">Hit</span><span class="num">{l.prob * 100:.0f}%</span></div></div>')
 
 
