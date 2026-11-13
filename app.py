@@ -17,8 +17,8 @@ from datetime import date, datetime, timedelta
 import pandas as pd
 import streamlit as st
 
-from engine import espn, props as propmod, teams, ufc
-from engine.common import ET, NOTES, cache_fresh, clear_disk_cache, fmt_spread, ml_to_prob
+from engine import espn, lines as linesmod, news as newsmod, props as propmod, teams, ufc, ufcstats
+from engine.common import ET, NOTES, cache_fresh, clear_disk_cache, fmt_spread, ml_to_prob, norm_name
 from engine.espn import LEAGUES
 from engine.ui import CSS, H, avatar_html, edge_badge, empty_card, esc, logo_html, note, status_pill
 
@@ -130,6 +130,16 @@ def compute_slate(lg_key: str, game_ids: tuple, q: float, inj_sig: tuple, tick: 
             "nba_adv": bool(nba_adv)}
 
 
+@st.cache_data(ttl=300, show_spinner=False, max_entries=8)
+def cached_lines(lg_key: str, tick: int) -> dict:
+    return linesmod.book_lines(LEAGUES[lg_key])
+
+
+@st.cache_data(ttl=300, show_spinner=False, max_entries=32)
+def cached_news(lg_key: str, team_ids: tuple, tick: int) -> list[dict]:
+    return newsmod.articles(LEAGUES[lg_key], team_ids)
+
+
 @st.cache_data(ttl=600, show_spinner=False, max_entries=64)
 def compute_props(lg_key: str, game_id: str, q: float, tick: int, _game: dict, _proj: dict,
                   _profiles: dict, _base: dict, _b2b: set, _inj: list[dict]) -> pd.DataFrame:
@@ -206,10 +216,31 @@ def matchup_card(g: dict, p: dict | None, b2b: set[str], kind: str) -> str:
     return body + f'<div class="mkts">{box1}{box2}{box3}</div></div>'
 
 
-def prop_card(r: dict, m: str, label: str, kind: str, b2b_ids: set[str]) -> str:
+def prop_edge(r: dict, m: str, book: tuple | None) -> float:
+    """Projection minus the sportsbook line when one exists, else minus the last-5 average."""
+    return r[f"P_{m}"] - (book[0] if book else r[f"A5_{m}"])
+
+
+def news_html(a: dict | None) -> str:
+    if not a:
+        return ""
+    head = esc(a["headline"])
+    if a.get("link"):
+        head = f'<a href="{esc(a["link"])}" target="_blank" rel="noopener">{head}</a>'
+    return f'<div class="news">📰 {head} <span>{esc(newsmod.age(a["published"]))}</span></div>'
+
+
+def prop_card(r: dict, m: str, label: str, kind: str, b2b_ids: set[str], book: tuple | None = None,
+              news_item: dict | None = None) -> str:
     lean, strong = propmod.EDGE[kind][m]
-    line, proj = r[f"L_{m}"], r[f"P_{m}"]
-    edge = proj - r[f"A5_{m}"]
+    proj = r[f"P_{m}"]
+    if book:
+        line, line_label = book[0], book[1]
+        hist = r.get(f"V10_{m}") or []
+        hit_v = float(sum(v > line for v in hist) / len(hist) * 100) if hist else float("nan")
+    else:
+        line, line_label, hit_v = r[f"L_{m}"], "Model line", r[f"H_{m}"]
+    edge = prop_edge(r, m, book)
     small = kind == "hockey" or m == "RECS"
     f1 = "{:.2f}" if kind == "hockey" and m in ("G", "A", "PTS") else "{:.1f}"
     chips = "".join(f'<span class="chip {"o" if v > line else "u"}">{v:.0f}</span>' for v in r[f"V5_{m}"])
@@ -218,7 +249,7 @@ def prop_card(r: dict, m: str, label: str, kind: str, b2b_ids: set[str]) -> str:
     if kind == "hockey" and m == "G" and r.get("AnyGoal") is not None:
         extra = f'<span class="pill info">Anytime goal {r["AnyGoal"] * 100:.0f}%</span>'
     b2b = '<span class="pill b2b">B2B</span>' if r["TeamId"] in b2b_ids else ""
-    hit = "—" if r[f"H_{m}"] != r[f"H_{m}"] else f'{r[f"H_{m}"]:.0f}%'
+    hit = "—" if hit_v != hit_v else f"{hit_v:.0f}%"
     l5_label = "Season" if "season avg" in str(r.get("Info", "")) else "L5 avg"
     others = [mm for mm, _ in propmod.MARKETS[kind] if mm != m][:3]
     mini = "".join(
@@ -231,12 +262,13 @@ def prop_card(r: dict, m: str, label: str, kind: str, b2b_ids: set[str]) -> str:
         f'{status_pill(r["Class"], r["Status"])} {b2b} {extra}</div></div>{badge}</div>'
         '<div class="pgrid">'
         f'<div class="pbox hl"><span class="lbl">Proj {esc(label)}</span><div class="num">{f1.format(proj)}</div></div>'
-        f'<div class="pbox"><span class="lbl">Model line</span><div class="num">{line:.1f}</div></div>'
+        f'<div class="pbox{" book" if book else ""}"><span class="lbl">{esc(line_label)}</span>'
+        f'<div class="num">{line:.1f}</div></div>'
         f'<div class="pbox"><span class="lbl">{l5_label}</span><div class="num">{r[f"A5_{m}"]:.{2 if small else 1}f}</div></div>'
         f'<div class="pbox"><span class="lbl">L10 hit</span><div class="num">{hit}</div></div>'
         '</div>'
         f'<div class="l5"><span class="lbl" style="margin-right:4px">Last 5</span>{chips or "—"}</div>'
-        f'<div class="mini">{mini}</div></div>'
+        f'<div class="mini">{mini}</div>{news_html(news_item)}</div>'
     )
 
 
@@ -334,6 +366,9 @@ def props_fragment(games: list[dict], slate: dict, inj: list[dict]) -> None:
 
     df = compute_props(lg.key, gid, float(q_sit), bucket(), g, slate["projections"][gid], slate["profiles"],
                        slate["base"], slate["b2b"], inj)
+    with st.spinner("Checking sportsbook lines and news…"):
+        book = cached_lines(lg.key, bucket(5))
+        arts = cached_news(lg.key, (g["away"]["id"], g["home"]["id"]), bucket(5))
     markets = propmod.MARKETS[kind]
     mlabels = dict(markets)
     m = st.segmented_control("Market", [k for k, _ in markets], default=markets[0][0], key=f"mkt_{sport}",
@@ -341,8 +376,11 @@ def props_fragment(games: list[dict], slate: dict, inj: list[dict]) -> None:
                              width="stretch") or markets[0][0]
     side = st.segmented_control("Team", ["Both", g["away"]["abbr"], g["home"]["abbr"]], default="Both",
                                 key=f"side_{sport}_{gid}", label_visibility="collapsed", width="stretch") or "Both"
-    note("Edge = projection vs. last-5 average (free sources publish no sportsbook prop lines). Chips = last 5 "
-         "games, green when over the model line. Hit = share of last 10 games over the model line.")
+    n_book = sum(1 for (_, mm) in book if mm == m)
+    note((f"Edge = projection vs. the live PrizePicks / Underdog line where one is posted ({n_book} {mlabels[m]} "
+          "lines on the board), otherwise vs. the last-5 average. " if n_book else
+          "No PrizePicks / Underdog lines found right now, so edge = projection vs. last-5 average. ")
+         + "Chips = last 5 games, green when over the line. Hit = share of last 10 games over the line.")
     if df.empty:
         empty_card("No players with recent game logs for this matchup yet.")
         return
@@ -354,11 +392,17 @@ def props_fragment(games: list[dict], slate: dict, inj: list[dict]) -> None:
     if df.empty:
         empty_card("No players qualify for this market.")
         return
-    df = df.assign(_e=(df[f"P_{m}"] - df[f"A5_{m}"]).abs()).sort_values("_e", ascending=False)
-    H("".join(prop_card(r, m, mlabels[m], kind, slate["b2b"]) for r in df.to_dict("records")))
+    recs = df.to_dict("records")
+    for r in recs:
+        r["_book"] = book.get((norm_name(r["Player"]), m))
+        r["_e"] = abs(prop_edge(r, m, r["_book"]))
+    recs.sort(key=lambda r: (r["_book"] is None, -r["_e"]))  # posted lines first, biggest edges on top
+    H("".join(prop_card(r, m, mlabels[m], kind, slate["b2b"], r["_book"],
+                        newsmod.for_player(arts, r["Id"], r["Player"])) for r in recs))
 
 
 def render_injuries(games: list[dict], inj: list[dict]) -> None:
+    arts = cached_news(lg.key, (), bucket(5))  # league feed only: one request keeps this tab instant
     note(f"ESPN injury report · Questionable / Day-to-Day players count as sitting {q_sit:.0%} of the time "
          "in projections (change in Settings).")
     order = {"OUT": 0, "Q": 1, "ACTIVE": 2}
@@ -372,7 +416,8 @@ def render_injuries(games: list[dict], inj: list[dict]) -> None:
             body = "".join(
                 f'<div class="irow"><div class="who"><div class="nm">{esc(i["player"])}'
                 f'<small style="color:var(--muted);font-weight:500"> {esc(i["pos"])}</small></div>'
-                f'<div class="dt">{esc(i["detail"])}</div></div>'
+                f'<div class="dt">{esc(i["detail"])}</div>'
+                f'{news_html(newsmod.for_player(arts, i["athlete_id"], i["player"], 7))}</div>'
                 f'<span class="pill {dict(OUT="out", Q="q").get(espn.injury_class(i["status"]), "ok")}">'
                 f'{esc(i["status"])}</span></div>' for i in rows) or '<div class="empty">No players listed.</div>'
             html.append(f'<div class="card"><div class="ihead">{logo_html(t["logo"], t["abbr"])}<div class="tinfo">'
@@ -390,8 +435,8 @@ def compute_card(event_id: str, tick: int, _card: dict) -> list[dict]:
     for b in _card["bouts"]:
         fa_, fb_ = b["fighters"]
         try:
-            pa_ = ufc.fighter_profile(fa_["id"], fa_)
-            pb_ = ufc.fighter_profile(fb_["id"], fb_)
+            pa_ = ufc.fighter_profile(fa_["id"], fa_, ufcstats.cached(fa_["name"]))
+            pb_ = ufc.fighter_profile(fb_["id"], fb_, ufcstats.cached(fb_["name"]))
             pred = ufc.predict_bout(b, pa_, pb_)
         except Exception as e:
             NOTES[f"bout {b['id']}"] = f"Prediction failed for {fa_['name']} vs {fb_['name']}: {e}"
@@ -467,6 +512,12 @@ def render_ufc() -> None:
                      "Loading fighter profiles")
     if fails:
         NOTES["ufc fighters"] = f"{fails} fighter profile(s) unavailable; those bouts lean on records."
+    names = [f["name"] for b in card["bouts"] for f in b["fighters"] if f["name"] and f["name"] != "TBA"]
+    prefetch([(ufcstats.key(n), ufcstats.TTL, lambda n=n: ufcstats.fetch(n)) for n in names],
+             "Loading UFCStats.com fighter stats")
+    missing = sum(ufcstats.cached(n) is None for n in names)
+    if missing:
+        NOTES["ufcstats"] = f"UFCStats.com had no match for {missing} of {len(names)} fighters (debuts or unreachable)."
     with st.spinner("Projecting bouts…"):
         bouts = compute_card(card["id"], bucket(), card)
 
@@ -560,6 +611,12 @@ def breakdown_fragment(bouts: list[dict]) -> None:
         f'{"+" if v > 0 else ""}{v:.2f} {who(v)}</span></div>' for n, v in pred["factors"])
     mkt = (f'<div class="factor"><span>Betting market (vig-free)</span><span class="v">{esc(_last(a["name"]))} '
            f'{pred["market"] * 100:.0f}%</span></div>' if pred["market"] else "")
+    arts = cached_news("UFC", (), bucket(5))
+    fnews = "".join(news_html(newsmod.for_player(arts, f["id"], f["name"], 10))
+                    for f in x["bout"]["fighters"])
+    src = [f'{esc(f["name"])}: {"UFCStats.com + ESPN" if pf.get("ufcstats") else "ESPN"}'
+           for f, pf in zip(x["bout"]["fighters"], (a, b))]
+    src_note = f'<div class="note" style="margin-top:8px">Stats source · {" · ".join(src)}</div>'
     detail_note = "" if (a["detail_ok"] and b["detail_ok"]) else (
         '<div class="note" style="margin-top:8px">Some fighter details are missing from ESPN; '
         'the projection leans on records for those fighters.</div>')
@@ -568,7 +625,8 @@ def breakdown_fragment(bouts: list[dict]) -> None:
       f'{mbars(a["name"], p, pred["methods_a"], "r")}{mbars(b["name"], 1 - p, pred["methods_b"], "b")}</div>'
       f'<div class="card"><div class="sub-h" style="margin-top:0">Model factors (log-odds, + favors '
       f'{esc(_last(a["name"]))})</div>{factors}{mkt}<div class="factor"><span>Model only</span>'
-      f'<span class="v">{esc(_last(a["name"]))} {pred["p_model"] * 100:.0f}%</span></div>{detail_note}</div>')
+      f'<span class="v">{esc(_last(a["name"]))} {pred["p_model"] * 100:.0f}%</span></div>{detail_note}{src_note}</div>'
+      + (f'<div class="card"><div class="sub-h" style="margin-top:0">Latest news</div>{fnews}</div>' if fnews else ""))
 
 
 # --------------------------------------------------------------------------

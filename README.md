@@ -18,6 +18,18 @@ ESPN's public JSON is the primary source for every sport:
 | Injuries (NBA, NFL, NHL) | `…/{league}/injuries` |
 | UFC fight cards and fighter profiles | `…/mma/ufc/scoreboard`, `site.web.api.espn.com/apis/common/v3/sports/mma/athletes/{id}` |
 
+Three outside sources add information ESPN doesn't have:
+
+| Extra data | Source | Fallback |
+|---|---|---|
+| Live player prop lines | PrizePicks board (`api.prizepicks.com/projections`) | Underdog Fantasy (`api.underdogfantasy.com/beta/v5/over_under_lines`) |
+| Official UFC fighter stats and win methods | UFCStats.com search + fighter-details pages | ESPN fighter stats |
+| Latest player news | ESPN news feeds (`…/{league}/news`, league-wide and per team), matched by athlete ID | — |
+
+Each extra source is cached for 10 minutes to 7 days and skipped for 30 minutes after a failure. When a prop has
+a posted line, its edge and hit rate are measured against that line. Otherwise they are measured against the
+player's last-5 average.
+
 For the NBA only, `nba_api` (stats.nba.com advanced Pace/OffRtg/DefRtg) is an optional enrichment. It runs
 inside a strict try/except with a 5-second timeout. If it fails, it is skipped for 6 hours and the
 ESPN-derived ratings are used. The app no longer calls cdn.nba.com at all.

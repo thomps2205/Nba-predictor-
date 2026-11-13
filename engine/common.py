@@ -138,6 +138,22 @@ def http_json(url: str, params: dict | None = None, headers: dict | None = None,
     raise RuntimeError(f"{type(last).__name__}: {url}") from last
 
 
+def http_text(url: str, params: dict | None = None, headers: dict | None = None,
+              timeout: float = HTTP_TIMEOUT, retries: int = 2) -> str:
+    """GET an HTML page with the same throttle/retry rules as http_json."""
+    last: Exception | None = None
+    for attempt in range(retries):
+        throttle()
+        try:
+            r = _session.get(url, params=params, headers=headers or {"User-Agent": BROWSER_UA}, timeout=timeout)
+            r.raise_for_status()
+            return r.text
+        except Exception as err:
+            last = err
+            time.sleep(0.8 * (attempt + 1))
+    raise RuntimeError(f"{type(last).__name__}: {url}") from last
+
+
 # --------------------------------------------------------------------------
 # Parsing helpers
 # --------------------------------------------------------------------------

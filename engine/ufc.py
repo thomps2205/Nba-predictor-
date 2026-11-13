@@ -229,7 +229,7 @@ def _find_record(obj) -> str:
     return ""
 
 
-def fighter_profile(fid: str, card_fighter: dict) -> dict:
+def fighter_profile(fid: str, card_fighter: dict, ufcs: dict | None = None) -> dict:
     prof = {"name": card_fighter["name"], "headshot": card_fighter.get("headshot", ""),
             "flag": card_fighter.get("flag", ""), "country": card_fighter.get("country", ""),
             "record": _record(card_fighter.get("record", "")), "age": None, "height": None, "reach": None,
@@ -289,6 +289,20 @@ def fighter_profile(fid: str, card_fighter: dict) -> dict:
     dec = pick(s, "decisionwins", "decwins", "decisions")
     if ko is not None and sub is not None and dec is not None and (ko + sub + dec) > 0:
         prof["methods"] = (ko, sub, dec)
+    prof["ufcstats"] = False
+    if ufcs:  # UFCStats.com: official career stats + win methods override ESPN; physicals fill gaps
+        prof["ufcstats"] = True
+        for k in ("height", "reach", "age"):
+            if not prof[k] and ufcs.get(k):
+                prof[k] = ufcs[k]
+        if not prof["stance"] and ufcs.get("stance"):
+            prof["stance"] = ufcs["stance"]
+        if not any(prof["record"]) and ufcs.get("record"):
+            prof["record"] = tuple(ufcs["record"])
+        prof["stats"].update({k: v for k, v in (ufcs.get("stats") or {}).items() if v is not None})
+        if ufcs.get("methods"):
+            prof["methods"] = tuple(ufcs["methods"])
+        prof["detail_ok"] = True
     return prof
 
 

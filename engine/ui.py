@@ -134,6 +134,11 @@ margin:16px 4px 8px;display:flex;align-items:center;gap:8px}
 .factor .v{font-weight:700}
 .factor .v.pos{color:var(--green)}.factor .v.neg{color:var(--red)}
 div[data-testid="stButtonGroup"]{gap:6px}
+.news{margin-top:9px;padding-top:8px;border-top:1px solid var(--line);font-size:.76rem;line-height:1.35;color:var(--text)}
+.news a{color:var(--text);text-decoration:none}
+.news span{color:var(--muted);white-space:nowrap}
+.pbox.book{border-color:rgba(56,189,248,.5)}
+.pbox.book .lbl{color:var(--blue)}
 </style>
 """
 

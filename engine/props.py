@@ -70,6 +70,7 @@ def _market_fields(row: dict, m: str, proj: float, hist: list[float], line: floa
     row[f"L_{m}"] = line
     row[f"A5_{m}"] = float(np.mean(hist[:5])) if hist else 0.0
     row[f"V5_{m}"] = [float(x) for x in hist[:5]]
+    row[f"V10_{m}"] = [float(x) for x in hist[:10]]
     row[f"H_{m}"] = float(np.mean([x > line for x in hist[:10]]) * 100) if hist else float("nan")
 
 
