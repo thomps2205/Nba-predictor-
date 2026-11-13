@@ -39,20 +39,55 @@ LEAGUES = {
     "UFC": League("UFC", "mma", "ufc", "mma", "UFC", False),
 }
 
-# Soccer competitions from around the world (ESPN league slugs). Key = short tag shown on cards.
-SOCCER_LEAGUES = [
-    ("EPL", "eng.1", "Premier League"), ("LALIGA", "esp.1", "LaLiga"), ("BUNDES", "ger.1", "Bundesliga"),
-    ("SERIEA", "ita.1", "Serie A"), ("LIGUE1", "fra.1", "Ligue 1"), ("UCL", "uefa.champions", "Champions League"),
-    ("UEL", "uefa.europa", "Europa League"), ("UECL", "uefa.europa.conf", "Conference League"),
-    ("MLS", "usa.1", "MLS"), ("LIGAMX", "mex.1", "Liga MX"), ("EREDIV", "ned.1", "Eredivisie"),
-    ("PRIMEIRA", "por.1", "Primeira Liga"), ("CHAMP", "eng.2", "Championship"), ("SPFL", "sco.1", "Scottish Prem"),
-    ("BRASIL", "bra.1", "Brasileirão"), ("ARG", "arg.1", "Argentina Primera"), ("SAUDI", "ksa.1", "Saudi Pro League"),
-    ("J1", "jpn.1", "J1 League"), ("SUPERLIG", "tur.1", "Süper Lig"), ("LIBERT", "conmebol.libertadores",
-                                                                       "Libertadores"),
+# Soccer: global roster grouped by region. (key, ESPN slug, display name, type: league / cup / intl)
+SOCCER_REGIONS = [
+    ("UEFA Club Competitions", [
+        ("UCL", "uefa.champions", "Champions League", "cup"), ("UEL", "uefa.europa", "Europa League", "cup"),
+        ("UECL", "uefa.europa.conf", "Conference League", "cup")]),
+    ("England", [
+        ("EPL", "eng.1", "Premier League", "league"), ("CHAMP", "eng.2", "EFL Championship", "league"),
+        ("FACUP", "eng.fa", "FA Cup", "cup"), ("EFLCUP", "eng.league_cup", "Carabao Cup", "cup")]),
+    ("Europe — Leagues & Cups", [
+        ("LALIGA", "esp.1", "LaLiga", "league"), ("COPAREY", "esp.copa_del_rey", "Copa del Rey", "cup"),
+        ("BUNDES", "ger.1", "Bundesliga", "league"), ("BUNDES2", "ger.2", "2. Bundesliga", "league"),
+        ("DFBPOKAL", "ger.dfb_pokal", "DFB-Pokal", "cup"), ("SERIEA", "ita.1", "Serie A", "league"),
+        ("COPPAIT", "ita.coppa_italia", "Coppa Italia", "cup"), ("LIGUE1", "fra.1", "Ligue 1", "league"),
+        ("EREDIV", "ned.1", "Eredivisie", "league"), ("PRIMEIRA", "por.1", "Primeira Liga", "league"),
+        ("SPFL", "sco.1", "Scottish Premiership", "league"), ("SUPERLIG", "tur.1", "Süper Lig", "league")]),
+    ("Americas & Global", [
+        ("MLS", "usa.1", "MLS", "league"), ("USL", "usa.usl.1", "USL Championship", "league"),
+        ("NWSL", "usa.nwsl", "NWSL", "league"), ("LIGAMX", "mex.1", "Liga MX", "league"),
+        ("BRASIL", "bra.1", "Brasileirão Série A", "league"), ("ARG", "arg.1", "Liga Profesional", "league"),
+        ("CCC", "concacaf.champions", "CONCACAF Champions Cup", "cup"),
+        ("LIBERT", "conmebol.libertadores", "Copa Libertadores", "cup"),
+        ("SAUDI", "ksa.1", "Saudi Pro League", "league"), ("J1", "jpn.1", "J1 League", "league")]),
+    ("International", [
+        ("WC", "fifa.world", "FIFA World Cup", "intl"), ("WCQ_UEFA", "fifa.worldq.uefa", "WC Qualifying — UEFA", "intl"),
+        ("WCQ_CONMEBOL", "fifa.worldq.conmebol", "WC Qualifying — CONMEBOL", "intl"),
+        ("WCQ_CONCACAF", "fifa.worldq.concacaf", "WC Qualifying — CONCACAF", "intl"),
+        ("NATIONS", "uefa.nations", "UEFA Nations League", "intl"),
+        ("FRIENDLY", "fifa.friendly", "International Friendlies", "intl")]),
 ]
-SOCCER_DEFAULT = ["EPL", "LALIGA", "BUNDES", "SERIEA", "LIGUE1", "UCL", "MLS"]
+SOCCER_LEAGUES = [(k, slug, name) for _, items in SOCCER_REGIONS for k, slug, name, _ in items]
+SOCCER_TYPE = {k: t for _, items in SOCCER_REGIONS for k, _, _, t in items}
+# "All Featured Leagues": the top active competitions queried together
+SOCCER_FEATURED = ["UCL", "UEL", "UECL", "EPL", "CHAMP", "FACUP", "EFLCUP", "LALIGA", "BUNDES", "SERIEA", "LIGUE1",
+                   "MLS", "LIGAMX", "WCQ_UEFA", "WCQ_CONMEBOL", "WCQ_CONCACAF", "NATIONS", "FRIENDLY"]
+SOCCER_DEFAULT = ["EPL", "LALIGA", "BUNDES", "SERIEA", "LIGUE1", "UCL", "MLS"]  # MIX uses these
 for _k, _slug, _name in SOCCER_LEAGUES:
     LEAGUES[_k] = League(_k, "soccer", _slug, "soccer", _name, False)
+
+# Where to borrow recent form when a cup / international slug has < 3 completed matches for a team.
+_EURO_TOP = ["eng.1", "esp.1", "ger.1", "ita.1", "fra.1", "por.1", "ned.1", "sco.1", "tur.1", "eng.2", "ger.2"]
+_INTL = ["fifa.friendly", "fifa.worldq.uefa", "fifa.worldq.conmebol", "fifa.worldq.concacaf", "uefa.nations",
+         "fifa.world"]
+SOCCER_FORM_FALLBACK = {
+    "FACUP": ["eng.1", "eng.2"], "EFLCUP": ["eng.1", "eng.2"], "CHAMP": ["eng.1"], "COPAREY": ["esp.1"],
+    "DFBPOKAL": ["ger.1", "ger.2"], "COPPAIT": ["ita.1"], "UCL": _EURO_TOP, "UEL": _EURO_TOP, "UECL": _EURO_TOP,
+    "CCC": ["usa.1", "mex.1"], "LIBERT": ["bra.1", "arg.1"],
+    **{k: _INTL for _, items in SOCCER_REGIONS for k, _, _, t in items if t == "intl"},
+}
+TTL_SOCCER_SCOREBOARD = 10 * 60  # many competitions per view: refresh every 10 min (live scores still update)
 
 
 def _base(lg: League) -> str:
@@ -73,6 +108,8 @@ def scoreboard(lg: League, d: date | None, today: date, days: int = 1) -> dict:
         ttl = TTL_SCOREBOARD_PAST if end < today else TTL_SCOREBOARD_LIVE
     else:
         ttl = TTL_SCOREBOARD_LIVE
+    if lg.kind == "soccer" and ttl == TTL_SCOREBOARD_LIVE:
+        ttl = TTL_SOCCER_SCOREBOARD
     key = f"scoreboard|{lg.key}|{params.get('dates', 'current')}"
     raw = disk_cached(key, ttl, lambda: http_json(f"{_base(lg)}/scoreboard", params))
     try:
@@ -267,6 +304,12 @@ def team_possessions(raw: dict, games_from_schedule: int = 0) -> float | None:
     if 50 < raw_poss < 120:  # values were already per game
         return raw_poss
     return None
+
+
+def soccer_schedule(slug: str, team_id: str) -> dict:
+    """A club / national team's fixtures under any soccer slug (incl. 'all' for every competition)."""
+    return disk_cached(f"schedule|SOC:{slug}|{team_id}", TTL_SCHEDULE,
+                       lambda: http_json(f"{SITE}/soccer/{slug}/teams/{team_id}/schedule", retries=1))
 
 
 def schedule_key(lg: League, team_id: str) -> str:

@@ -78,13 +78,27 @@ streamlit run app.py
     3-leg, longshot 4-leg and a Props + game lines 3-leg (MIX adds a 3-leg with every leg from a different sport).
   * Each card shows hit chance, estimated odds (ESPN moneylines, -110 spreads/totals, -115 pick'em props), fair
     odds and expected value.
-* **Soccer** covers 20 competitions from around the world: Premier League, LaLiga, Bundesliga, Serie A,
-  Ligue 1, Champions / Europa / Conference League, MLS, Liga MX, Eredivisie, Primeira Liga, Championship,
-  Scottish Prem, Brasileirão, Argentina, Saudi Pro League, J1, Süper Lig and Libertadores. Pick them in the
-  Leagues panel.
-  * A Poisson goal model gives home / draw / away probabilities, projected score, total goals and
-    both-teams-to-score.
-  * Edges are measured against ESPN's three-way odds and goal totals. Soccer legs also appear in Parlays and MIX.
+* **Soccer** covers 35 competitions, grouped by region in the league selector:
+  * **UEFA club:** Champions, Europa and Conference League.
+  * **England:** Premier League, EFL Championship, FA Cup, Carabao Cup.
+  * **Europe:** LaLiga, Copa del Rey, Bundesliga, 2. Bundesliga, DFB-Pokal, Serie A, Coppa Italia, Ligue 1,
+    Eredivisie, Primeira Liga, Scottish Premiership, Süper Lig.
+  * **Americas & global:** MLS, USL Championship, NWSL, Liga MX, Brasileirão, Liga Profesional, CONCACAF
+    Champions Cup, Copa Libertadores, Saudi Pro League, J1.
+  * **International:** World Cup, WC qualifying (UEFA / CONMEBOL / CONCACAF), UEFA Nations League,
+    friendlies.
+
+  How it works:
+  * **Leagues:** "All Featured" queries the 18 top active competitions at once and groups matches by
+    competition, with a badge on each card. "Choose leagues" opens the regional picker.
+  * **Dates:** a Today / Next 3 Days / Weekend toggle. An empty day automatically shows the next 4 days.
+  * **Model:** a Poisson goal model gives home / draw / away, projected score, total goals and
+    both-teams-to-score. Edges are measured against ESPN's three-way odds and goal totals.
+  * **Cup and international form:** when a cup tie or national team has fewer than 3 completed matches in
+    that competition, the app merges in recent results from ESPN's all-competitions schedule
+    (`soccer/all/teams/{id}/schedule`). It then tries the club's domestic leagues, or other international
+    competitions for national teams.
+  * **Parlays:** soccer legs appear in the Parlays tab and in MIX.
 * **Injuries** (NBA, NFL, NHL) shows ESPN's report for every team on the slate.
 * **UFC:**
   * **Fight Card** lists every bout from the main event down to the prelims, with records, odds, win

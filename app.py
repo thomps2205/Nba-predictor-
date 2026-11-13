@@ -190,13 +190,13 @@ def compute_props(lg_key: str, game_id: str, q: float, tick: int, _game: dict, _
     return propmod.build_props(LEAGUES[lg_key], _game, _proj, _profiles, _base, _b2b, _inj, q)
 
 
-def matchup_card(g: dict, p: dict | None, b2b: set[str], kind: str) -> str:
+def matchup_card(g: dict, p: dict | None, b2b: set[str], kind: str, badge: str = "") -> str:
     h, a = g["home"], g["away"]
-    st_pill = ""
+    st_pill = f'<span class="pill comp">{esc(badge)}</span>' if badge else ""
     if g["state"] == "in":
-        st_pill = f'<span class="pill live">● {esc(g["status"])}</span>'
+        st_pill += f'<span class="pill live">● {esc(g["status"])}</span>'
     elif g["state"] == "post":
-        st_pill = f'<span class="pill final">{esc(g["status"])}</span>'
+        st_pill += f'<span class="pill final">{esc(g["status"])}</span>'
     tags = "".join(f'<span class="pill b2b">{esc(t["abbr"])} B2B</span>' for t in (a, h) if t["id"] in b2b)
     if g["neutral"]:
         tags += '<span class="pill info">Neutral</span>'
@@ -297,29 +297,71 @@ def soccer_markets(g: dict, p: dict) -> str:
             f'<div class="sub">BTTS</div><span class="badge muted">MODEL</span></div></div>')
 
 
+def soccer_window(mode: str, d: date) -> tuple[date, int, str]:
+    if mode == "Next 3 Days":
+        return d, 3, f"{d:%a %b %d} – {d + timedelta(days=2):%a %b %d}"
+    if mode == "Weekend":
+        start = d if d.weekday() >= 4 else d + timedelta(days=4 - d.weekday())  # Friday (or today if Fri-Sun)
+        days = 6 - start.weekday() + 1                                          # through Sunday
+        return start, days, f"Weekend · {start:%a %b %d} – {start + timedelta(days=days - 1):%a %b %d}"
+    return d, 1, f"{d:%a, %b %d}"
+
+
+def soccer_fixtures(keys: list[str], start: date, days: int) -> tuple[list[dict], list[str]]:
+    games, failed = [], []
+    for k in keys:
+        lg_ = LEAGUES[k]
+        try:
+            gs = (espn.parse_games(lg_, espn.scoreboard(lg_, start, today_et)) if days == 1
+                  else espn.week_games(lg_, start, days, today_et))
+        except Exception:
+            failed.append(lg_.label)
+            continue
+        for g in gs:
+            g["league"] = k
+            games.append(g)
+    return games, failed
+
+
 def render_soccer() -> None:
     keys = [k for k, _, _ in espn.SOCCER_LEAGUES]
-    n_sel = len(st.session_state.get("soc_leagues") or espn.SOCCER_DEFAULT)
-    with st.expander(f"🌍  Leagues ({n_sel} selected)", expanded=False):
-        picked = st.pills("Leagues", keys, selection_mode="multi", default=espn.SOCCER_DEFAULT, key="soc_leagues",
-                          format_func=lambda k: LEAGUES[k].label, label_visibility="collapsed")
-    picked = picked or espn.SOCCER_DEFAULT
     order = {k: i for i, k in enumerate(keys)}
-    games, failed = [], []
-    with st.spinner("Loading fixtures…"):
-        for k in picked:
-            try:
-                for g in fetch_games(k, sel_date):
-                    g["league"] = k
-                    games.append(g)
-            except Exception:
-                failed.append(LEAGUES[k].label)
+    mode = st.segmented_control("Leagues", ["All Featured", "Choose leagues"], default="All Featured",
+                                key="soc_mode", label_visibility="collapsed", width="stretch") or "All Featured"
+    if mode == "Choose leagues":
+        picked: list[str] = []
+        n_sel = sum(len(st.session_state.get(f"soc_r{i}") or []) for i in range(len(espn.SOCCER_REGIONS)))
+        with st.expander(f"🌍  Leagues & cups ({n_sel or len(espn.SOCCER_DEFAULT)} selected)", expanded=not n_sel):
+            for i, (region, items) in enumerate(espn.SOCCER_REGIONS):
+                H(f'<div class="region-h">{esc(region)}</div>')
+                rk = [k for k, _, _, _ in items]
+                sel = st.pills(region, rk, selection_mode="multi", key=f"soc_r{i}",
+                               default=[k for k in rk if k in espn.SOCCER_DEFAULT],
+                               format_func=lambda k: LEAGUES[k].label, label_visibility="collapsed")
+                picked += sel or []
+        picked = picked or espn.SOCCER_DEFAULT
+    else:
+        picked = espn.SOCCER_FEATURED
+    window = st.segmented_control("Window", ["Today", "Next 3 Days", "Weekend"], default="Today",
+                                  key="soc_window", label_visibility="collapsed", width="stretch") or "Today"
+    start, days, label = soccer_window(window, sel_date)
+    with st.spinner(f"Loading fixtures from {len(picked)} competitions…"):
+        games, failed = soccer_fixtures(picked, start, days)
+        if not games and window == "Today":  # empty day: look 4 days ahead automatically
+            start, days = sel_date, 4
+            games, failed = soccer_fixtures(picked, start, days)
+            if games:
+                label = f"Next 4 days · {start:%a %b %d} – {start + timedelta(days=3):%a %b %d}"
+                NOTES["soccer window"] = "No matches today in these competitions — showing the next 4 days."
     if failed:
         NOTES["soccer"] = f"No ESPN fixtures feed for: {', '.join(failed)}."
     games.sort(key=lambda g: (order[g["league"]], g["tip"] is None, g["tip"] or 0))
-    hero(f'{sel_date:%a, %b %d}<br>{len(games)} match{"es" if len(games) != 1 else ""}')
+    n_comp = len({g["league"] for g in games})
+    hero(f'{label}<br>{len(games)} match{"es" if len(games) != 1 else ""} · {n_comp} '
+         f'competition{"s" if n_comp != 1 else ""}')
     if not games:
-        empty_card("No matches in the selected leagues on this date.", "Add leagues above or pick another date.")
+        empty_card("No matches in these competitions for this window.",
+                   "Try Next 3 Days / Weekend, add competitions, or pick another date in Settings.")
         return
     if len(games) > PAGE_SIZE:
         pages = (len(games) + PAGE_SIZE - 1) // PAGE_SIZE
@@ -333,14 +375,18 @@ def render_soccer() -> None:
 
     tab_m, tab_p = st.tabs(["🎯 Matchups", "🎟 Parlays"])
     with tab_m:
-        note("Poisson goal model from each club's goals for/against (season + last 5, home edge). Bar = away · "
-             "draw · home win chances; badges compare with ESPN's three-way odds and goal total.")
+        note("Poisson goal model from each team's goals for/against (season + last 5, home edge). Cup ties and "
+             "national teams with little history in that competition borrow the team's recent results from other "
+             "competitions. Bar = away · draw · home; badges compare with ESPN's three-way odds and goal total.")
         html, cur = [], None
         for g in games:
             if g["league"] != cur:
                 cur = g["league"]
-                html.append(f'<div class="seg-head">{league_logo_html(cur, 22)} {esc(LEAGUES[cur].label)}</div>')
-            html.append(matchup_card(g, slates[cur]["projections"].get(g["id"]), set(), "soccer"))
+                kind_tag = {"cup": "Cup", "intl": "International"}.get(espn.SOCCER_TYPE.get(cur, ""), "")
+                html.append(f'<div class="seg-head">{league_logo_html(cur, 22)} {esc(LEAGUES[cur].label)}'
+                            + (f' <span class="pill info">{kind_tag}</span>' if kind_tag else "") + "</div>")
+            html.append(matchup_card(g, slates[cur]["projections"].get(g["id"]), set(), "soccer",
+                                     badge=LEAGUES[cur].label))
         H("".join(html))
     with tab_p:
         legs = []
@@ -430,8 +476,8 @@ def load_team_data(sk: str, games: list[dict]) -> tuple[dict, list[dict]]:
             if tid and tid not in seen:
                 seen.add(tid)
                 reqs += teams.needed_requests(lg_, tid)
-    fails = prefetch(reqs, f"Loading {sk} team stats")
-    if fails:
+    fails = prefetch(reqs, f"Loading {lg_.label} team form")
+    if fails and lg_.kind != "soccer":
         NOTES[f"teams {sk}"] = (f"{fails} {sk} team request(s) failed; affected teams use a simpler points-only "
                                 "model or show no projection.")
     inj_sig = tuple((i["team_id"], i["key"], i["status"]) for i in inj)
@@ -991,6 +1037,11 @@ allowed and the team's implied total.
 **NHL** — Poisson goal model (goals for × opponent goals against / league average, home ice, back-to-backs);
 win % includes overtime, plus puck-line probability. Props: weighted last-10 goals / assists / shots × opponent
 goals allowed; anytime-goal probability = 1 − e^(−projected goals).
+
+**Soccer** — Poisson goal model per team (goals for × opponent goals against / league average, season blended
+with last 5, home edge, neutral venues). Gives home / draw / away, projected score, total goals and both-teams-to-
+score. Cup ties and national teams with fewer than 3 matches in that competition borrow recent results from
+ESPN's all-competitions schedule, then domestic leagues (or other international competitions).
 
 **UFC** — Logistic model on smoothed win %, experience, reach, age, striking differential and grappling rates,
 blended 50/50 with the vig-free betting line when ESPN lists odds. Method of victory blends weight-class finish

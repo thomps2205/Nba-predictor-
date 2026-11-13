@@ -43,6 +43,8 @@ letter-spacing:.03em;text-transform:uppercase;white-space:nowrap}
 .pill.q{background:var(--amber-bg);color:var(--amber)}
 .pill.ok{background:var(--green-bg);color:var(--green)}
 .pill.info{background:var(--blue-bg);color:var(--blue)}
+.pill.comp{background:var(--card2);color:var(--text);border:1px solid var(--line);text-transform:none;letter-spacing:0}
+.region-h{color:var(--muted);font-size:.68rem;font-weight:800;letter-spacing:.09em;text-transform:uppercase;margin:10px 2px 4px}
 .trow{display:flex;align-items:center;gap:10px;padding:6px 0}
 .logo{width:34px;height:34px;object-fit:contain;flex:none}
 .logo-fb{width:34px;height:34px;border-radius:50%;background:var(--card2);display:flex;align-items:center;

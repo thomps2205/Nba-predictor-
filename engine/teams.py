@@ -37,12 +37,44 @@ def needed_requests(lg: League, team_id: str) -> list[tuple[str, float, callable
     return reqs
 
 
+MIN_SOCCER_GAMES = 3
+TARGET_SOCCER_GAMES = 6
+
+
+def _soccer_form(lg: League, team_id: str, before: date, games: list[dict]) -> list[dict]:
+    """Cup ties and national teams often have < 3 matches under that competition: merge in the team's results
+    from ESPN's all-competitions schedule, then likely domestic leagues (or other international competitions)."""
+    if len(games) >= MIN_SOCCER_GAMES:
+        return games
+    seen = {(g["date"], g["opp"]) for g in games}
+    merged = list(games)
+    for slug in ["all", *espn.SOCCER_FORM_FALLBACK.get(lg.key, [])]:
+        if slug == lg.league:
+            continue
+        try:
+            extra = espn.parse_completed_games(espn.soccer_schedule(slug, team_id), team_id, before)
+        except Exception:
+            continue
+        for g in extra:
+            if (g["date"], g["opp"]) not in seen:
+                seen.add((g["date"], g["opp"]))
+                merged.append(g)
+        if len(merged) >= TARGET_SOCCER_GAMES:
+            break
+    merged.sort(key=lambda g: g["date"])
+    return merged[-20:]  # recent form only
+
+
 def team_profile(lg: League, team_id: str, before: date) -> dict | None:
     try:
         games = espn.parse_completed_games(espn.team_schedule(lg, team_id), team_id, before)
     except Exception as e:
-        NOTES[f"schedule {lg.key}"] = f"Team schedule unavailable ({e})"
-        return None
+        games = []
+        if lg.kind != "soccer":
+            NOTES[f"schedule {lg.key}"] = f"Team schedule unavailable ({e})"
+            return None
+    if lg.kind == "soccer":
+        games = _soccer_form(lg, team_id, before, games)
     if not games:
         return None
     pf = [g["pf"] for g in games]
