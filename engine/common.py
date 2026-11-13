@@ -39,6 +39,15 @@ ESPN_HEADERS = {
 # Notes surfaced in the UI footer: stale-cache fallbacks and endpoint failures.
 NOTES: dict[str, str] = {}
 
+# League logos: ESPN's CDN defaults, replaced by the URL ESPN's own scoreboard reports (leagues[].logos).
+LEAGUE_LOGOS: dict[str, str] = {
+    "NBA": "https://a.espncdn.com/i/teamlogos/leagues/500/nba.png",
+    "NCAAB": "https://a.espncdn.com/i/teamlogos/ncaa/500/ncaa.png",
+    "NFL": "https://a.espncdn.com/i/teamlogos/leagues/500/nfl.png",
+    "NHL": "https://a.espncdn.com/i/teamlogos/leagues/500/nhl.png",
+    "UFC": "https://a.espncdn.com/i/teamlogos/leagues/500/ufc.png",
+}
+
 _lock = threading.Lock()
 _last_call = [0.0]
 _session = requests.Session()

@@ -11,16 +11,55 @@ Run:  streamlit run app.py
 
 from __future__ import annotations
 
+import importlib
+import os
 import time
 from datetime import date, datetime, timedelta
 
 import pandas as pd
 import streamlit as st
 
-from engine import espn, lines as linesmod, news as newsmod, parlays, props as propmod, teams, ufc, ufcstats
-from engine.common import ET, NOTES, cache_fresh, clear_disk_cache, fmt_spread, ml_to_prob, norm_name
-from engine.espn import LEAGUES, League
-from engine.ui import CSS, H, avatar_html, edge_badge, empty_card, esc, logo_html, note, status_pill
+import engine.common
+import engine.espn
+import engine.lines
+import engine.news
+import engine.parlays
+import engine.props
+import engine.teams
+import engine.ufc
+import engine.ufcstats
+import engine.ui
+
+_ENGINE = [engine.common, engine.espn, engine.teams, engine.props, engine.lines, engine.news, engine.ufc,
+           engine.ufcstats, engine.parlays, engine.ui]  # dependency order
+
+
+@st.cache_resource(show_spinner=False)
+def _engine_mtimes() -> dict:
+    return {}
+
+
+def _refresh_engine() -> None:
+    """Streamlit Cloud re-runs app.py after a push but keeps already-imported engine modules in memory.
+    Reload them (in dependency order) on first run of this code and whenever an engine file changes."""
+    if os.environ.get("SHARPBOARD_NO_RELOAD"):  # tests patch engine functions; keep them
+        return
+    seen = _engine_mtimes()
+    now = {m.__file__: os.path.getmtime(m.__file__) for m in _ENGINE}
+    if seen != now:  # first run of this code in the process, or a file changed since the last reload
+        for m in _ENGINE:
+            importlib.reload(m)
+        seen.clear()
+        seen.update(now)
+
+
+_refresh_engine()
+
+from engine import espn, lines as linesmod, news as newsmod, parlays, props as propmod, teams, ufc, ufcstats  # noqa: E402
+from engine.common import ET, NOTES, cache_fresh, clear_disk_cache, fmt_spread, ml_to_prob, norm_name  # noqa: E402
+from engine.espn import LEAGUES, League  # noqa: E402
+from engine.ui import (CSS, H, avatar_html, edge_badge, empty_card, esc, league_logo_html, logo_html,  # noqa: E402
+                       note, status_pill)
 
 st.set_page_config(page_title="Sharp Board", page_icon="🏆", layout="centered", initial_sidebar_state="collapsed")
 H(CSS)
@@ -88,7 +127,8 @@ with st.expander("⚙️  Settings", expanded=False):
 
 
 def hero(sub: str) -> None:
-    H(f'<div class="hero"><div class="brand">{SPORT_ICON[sport]} {esc(sport)} <span>Picks</span></div>'
+    icon = SPORT_ICON[sport] if sport == "MIX" else league_logo_html(sport, 36)
+    H(f'<div class="hero"><div class="brand">{icon}{esc(sport)} <span>Picks</span></div>'
       f'<div class="hero-sub">{sub}</div></div>')
 
 
@@ -665,14 +705,18 @@ def breakdown_fragment(bouts: list[dict]) -> None:
 # --------------------------------------------------------------------------
 # Parlays
 # --------------------------------------------------------------------------
-LEG_ICON = {"NBA": "🏀", "NCAAB": "🏀", "NFL": "🏈", "NHL": "🏒", "UFC": "🥊"}
 
 
-def leg_html(l: parlays.Leg) -> str:
-    sub = " · ".join(x for x in (l.matchup, l.market, l.when, l.note) if x)
-    return (f'<div class="leg"><span class="sp">{LEG_ICON.get(l.sport, "")} {esc(l.sport)}</span>'
-            f'<div class="lg-main"><div class="lg-pick">{esc(l.pick)}</div><div class="lg-sub">{esc(sub)}</div></div>'
-            f'<div class="lg-p"><span class="lbl">Hit</span>{l.prob * 100:.0f}%</div></div>')
+def leg_html(l: parlays.Leg, show_edge: bool = False) -> str:
+    sub = " · ".join(x for x in (l.matchup, l.when) if x)
+    note_ = f'<div class="lg-note">{esc(l.note)}</div>' if l.note else ""
+    edge = (f'<span class="lg-edge">+{l.edge * 100:.1f}% edge at {parlays.dec_to_american(l.dec)}</span>'
+            if show_edge else "")
+    return (f'<div class="leg">{league_logo_html(l.sport, 34)}'
+            f'<div class="lg-main"><div class="lg-pick">{esc(l.pick)}</div>'
+            f'<div class="lg-sub"><span class="mk">{esc(l.sport)} · {esc(l.market)}</span>{esc(sub)}</div>'
+            f'{note_}{edge}</div>'
+            f'<div class="lg-p"><span class="lbl">Hit</span><span class="num">{l.prob * 100:.0f}%</span></div></div>')
 
 
 def parlay_card(pl: dict) -> str:
@@ -704,8 +748,7 @@ def render_parlays(legs: list[parlays.Leg], mixed: bool = False) -> None:
                    "Parlays use at most one leg per game" + (" and need legs from 2+ sports." if mixed else "."))
     H("".join(parlay_card(p) for p in built))
     H('<div class="seg-head">Top value legs</div>'
-      + '<div class="card">' + "".join(leg_html(l) + f'<div class="lg-edge">Edge {l.edge * 100:+.1f}% vs '
-                                       f'{parlays.dec_to_american(l.dec)}</div>' for l in pool[:10]) + "</div>")
+      + '<div class="card">' + "".join(leg_html(l, show_edge=True) for l in pool[:10]) + "</div>")
 
 
 def gather_prop_legs(sk: str, games: list[dict], slate: dict, inj: list[dict], load_all: bool) -> list:
@@ -779,8 +822,9 @@ def render_mixed() -> None:
     except Exception as e:
         coverage.append(f"UFC: unavailable ({type(e).__name__})")
     H('<div class="card"><div class="sub-h" style="margin-top:0">Today\'s board</div>'
-      + "".join(f'<div class="factor"><span>{esc(c.split(":")[0])}</span><span class="v">'
-                f'{esc(c.split(":", 1)[1].strip())}</span></div>' for c in coverage) + "</div>")
+      + "".join(f'<div class="factor" style="align-items:center"><span style="display:flex;align-items:center;'
+                f'gap:10px">{league_logo_html(c.split(":")[0], 28)}<b>{esc(c.split(":")[0])}</b></span>'
+                f'<span class="v">{esc(c.split(":", 1)[1].strip())}</span></div>' for c in coverage) + "</div>")
     note("Mixed parlays combine the best value legs across sports (one leg per game, legs from 2+ sports). "
          "Hit chances blend each sport's model (60%) with the market (40%); prices are ESPN moneylines, -110 spreads/totals and -115 "
          "pick'em props. Not betting advice.")

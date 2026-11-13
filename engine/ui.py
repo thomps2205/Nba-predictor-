@@ -138,14 +138,24 @@ div[data-testid="stButtonGroup"]{gap:6px}
 .news a{color:var(--text);text-decoration:none}
 .news span{color:var(--muted);white-space:nowrap}
 .pbox.book{border-color:rgba(56,189,248,.5)}
-.pl-title{font-weight:800;font-size:1rem;color:var(--text);text-transform:none;letter-spacing:0}
-.leg{display:flex;align-items:center;gap:10px;padding:9px 0;border-top:1px solid var(--line)}
-.leg .sp{font-size:.64rem;font-weight:800;color:var(--muted);white-space:nowrap;min-width:52px}
+.pl-title{font-weight:800;font-size:1.12rem;color:var(--text);text-transform:none;letter-spacing:0}
+.leg{display:flex;align-items:flex-start;gap:12px;padding:12px 0;border-top:1px solid var(--line)}
+.lglogo{position:relative;flex:none;border-radius:9px;background:#f4f6f8;display:flex;align-items:center;
+justify-content:center;overflow:hidden}
+.lglogo span{font-size:.95rem}
+.lglogo .lg-img{position:absolute;inset:3px;background-size:contain;background-position:center;background-repeat:no-repeat}
 .lg-main{flex:1;min-width:0}
-.lg-pick{font-weight:800;font-size:.9rem}
-.lg-sub{color:var(--muted);font-size:.7rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.lg-p{text-align:right;font-weight:800;color:var(--green);min-width:40px}
-.lg-edge{color:var(--muted);font-size:.68rem;text-align:right;margin:-6px 0 2px}
+.lg-pick{font-weight:800;font-size:1.05rem;line-height:1.25;color:var(--text)}
+.lg-sub{color:var(--muted);font-size:.8rem;line-height:1.4;margin-top:4px}
+.lg-sub .mk{display:inline-block;font-size:.62rem;font-weight:800;padding:2px 7px;border-radius:6px;
+background:var(--card2);border:1px solid var(--line);color:var(--text);margin-right:6px;letter-spacing:.04em;
+text-transform:uppercase;vertical-align:1px}
+.lg-note{color:var(--blue);font-size:.74rem;margin-top:3px}
+.lg-edge{display:inline-block;margin-top:5px;font-size:.7rem;font-weight:800;color:var(--green);
+background:var(--green-bg);padding:2px 7px;border-radius:6px}
+.lg-p{text-align:right;min-width:52px}
+.lg-p .num{display:block;font-weight:800;font-size:1.25rem;color:var(--green);line-height:1.1}
+.brand .lglogo{display:inline-flex;vertical-align:-6px;margin-right:6px}
 .pbox.book .lbl{color:var(--blue)}
 </style>
 """
@@ -168,6 +178,19 @@ def avatar_html(url: str, name: str, size: int = 54) -> str:
     img = f'<div class="av-img" style="background-image:url(\'{esc(url)}\')"></div>' if url else ""
     style = f' style="width:{size}px;height:{size}px"' if size != 54 else ""
     return f'<div class="avatar"{style}><span>{esc(initials)}</span>{img}</div>'
+
+
+LEAGUE_EMOJI = {"NBA": "🏀", "NCAAB": "🏀", "NFL": "🏈", "NHL": "🏒", "UFC": "🥊"}
+
+
+def league_logo_html(sport: str, size: int = 34) -> str:
+    """League logo on a light tile (logos are dark-on-light); the emoji shows if the image can't load."""
+    from .common import LEAGUE_LOGOS
+
+    url = LEAGUE_LOGOS.get(sport, "")
+    img = f'<div class="lg-img" style="background-image:url(\'{esc(url)}\')"></div>' if url else ""
+    return (f'<div class="lglogo" style="width:{size}px;height:{size}px" title="{esc(sport)}">'
+            f'<span>{LEAGUE_EMOJI.get(sport, "")}</span>{img}</div>')
 
 
 def edge_badge(edge, lean: float, strong: float, pos: str, neg: str, neg_is_red: bool = False, fmt: str = "{:.1f}") -> str:

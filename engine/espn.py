@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from datetime import date, timedelta
 
-from .common import (cache_fresh, cache_read, disk_cached, http_json, made_att, norm_name, num, to_et,
+from .common import (LEAGUE_LOGOS, cache_fresh, cache_read, disk_cached, http_json, made_att, norm_name, num, to_et,
                      to_et_date, to_minutes)
 
 SITE = "https://site.api.espn.com/apis/site/v2/sports"
@@ -59,7 +59,16 @@ def scoreboard(lg: League, d: date | None, today: date, days: int = 1) -> dict:
     else:
         ttl = TTL_SCOREBOARD_LIVE
     key = f"scoreboard|{lg.key}|{params.get('dates', 'current')}"
-    return disk_cached(key, ttl, lambda: http_json(f"{_base(lg)}/scoreboard", params))
+    raw = disk_cached(key, ttl, lambda: http_json(f"{_base(lg)}/scoreboard", params))
+    try:
+        logos = ((raw.get("leagues") or [{}])[0] or {}).get("logos") or []
+        href = next((l.get("href") for l in logos if "dark" not in (l.get("rel") or [])), None) or \
+            (logos[0].get("href") if logos else None)  # standard logo: it sits on a light tile
+        if href:
+            LEAGUE_LOGOS[lg.key] = href
+    except Exception:
+        pass
+    return raw
 
 
 def week_games(lg: League, start: date, days: int, today: date) -> list[dict]:
