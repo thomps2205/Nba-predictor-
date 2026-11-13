@@ -16,6 +16,12 @@ CFG = {
     "NFL": dict(hca=1.6, sigma=13.5, b2b=False, shrink=2, lg_pts=22.5),
     "NHL": dict(home_goals=0.12, b2b=True, shrink=5, lg_pts=3.05),
 }
+SOCCER_CFG = dict(home_goals=0.30, b2b=False, shrink=4, lg_pts=1.35)
+
+
+def cfg(key: str) -> dict:
+    """Model settings for a league key (every soccer competition shares SOCCER_CFG)."""
+    return CFG.get(key, SOCCER_CFG)
 B2B_OWN = {"NBA": 1.2, "NHL": 0.15}     # points/goals lost on the 2nd night of a back-to-back
 B2B_OPP = {"NBA": 1.0, "NHL": 0.10}     # extra points/goals conceded
 INJ_PTS_FACTOR = 0.15                    # team points lost per missing player-point (replacement recovers the rest)
@@ -98,7 +104,7 @@ def _adv_lookup(adv: dict, display_name: str) -> dict | None:
 
 
 def league_baseline(key: str, profiles: dict[str, dict]) -> dict:
-    cfg = CFG[key]
+    cfg = globals()["cfg"](key)
     ps = [p for p in profiles.values() if p]
     lg_pts = sum(p["pf"] for p in ps) / len(ps) if len(ps) >= 6 else cfg["lg_pts"]
     paces = [p["pace"] for p in ps if p.get("pace")]
@@ -122,12 +128,33 @@ def project_game(lg: League, game: dict, ph: dict | None, pa_: dict | None, base
     if not ph or not pa_:
         return None
     key = lg.key
-    cfg = CFG[key]
+    cfg = globals()["cfg"](key)
     hid, aid = game["home"]["id"], game["away"]["id"]
     lg_pts = base["pts"]
     off_h, def_h = _blend(ph, "pf", lg_pts, cfg["shrink"]), _blend(ph, "pa", lg_pts, cfg["shrink"])
     off_a, def_a = _blend(pa_, "pf", lg_pts, cfg["shrink"]), _blend(pa_, "pa", lg_pts, cfg["shrink"])
     out: dict = {"poss": None}
+
+    if lg.kind == "soccer":
+        hg = cfg["home_goals"] if not game["neutral"] else 0.0
+        lam_h = max(off_h * def_a / lg_pts + hg / 2, 0.15)
+        lam_a = max(off_a * def_h / lg_pts - hg / 2, 0.15)
+        p_h = p_d = p_a = btts = 0.0
+        for i in range(11):
+            for j in range(11):
+                p = _poisson(i, lam_h) * _poisson(j, lam_a)
+                if i > j:
+                    p_h += p
+                elif i == j:
+                    p_d += p
+                else:
+                    p_a += p
+                if i > 0 and j > 0:
+                    btts += p
+        tot = p_h + p_d + p_a
+        out.update(pts_home=lam_h, pts_away=lam_a, total=lam_h + lam_a, spread_home=-(lam_h - lam_a),
+                   home_win_prob=p_h / tot, draw_prob=p_d / tot, away_win_prob=p_a / tot, btts_prob=btts / tot)
+        return out
 
     if lg.kind == "hockey":
         hg = cfg["home_goals"] if not game["neutral"] else 0.0

@@ -1,4 +1,4 @@
-# Sharp Board: NBA · NCAAB · NFL · NHL · UFC predictor
+# Sharp Board: NBA · NCAAB · NFL · NHL · Soccer · UFC predictor
 
 A mobile-first, sportsbook-style Streamlit app. It projects spreads, totals, win probabilities and player
 props for the NBA, men's college basketball, NFL and NHL. It also projects UFC fight cards, with win
@@ -78,6 +78,13 @@ streamlit run app.py
     3-leg, longshot 4-leg and a Props + game lines 3-leg (MIX adds a 3-leg with every leg from a different sport).
   * Each card shows hit chance, estimated odds (ESPN moneylines, -110 spreads/totals, -115 pick'em props), fair
     odds and expected value.
+* **Soccer** covers 20 competitions from around the world: Premier League, LaLiga, Bundesliga, Serie A,
+  Ligue 1, Champions / Europa / Conference League, MLS, Liga MX, Eredivisie, Primeira Liga, Championship,
+  Scottish Prem, Brasileirão, Argentina, Saudi Pro League, J1, Süper Lig and Libertadores. Pick them in the
+  Leagues panel.
+  * A Poisson goal model gives home / draw / away probabilities, projected score, total goals and
+    both-teams-to-score.
+  * Edges are measured against ESPN's three-way odds and goal totals. Soccer legs also appear in Parlays and MIX.
 * **Injuries** (NBA, NFL, NHL) shows ESPN's report for every team on the slate.
 * **UFC:**
   * **Fight Card** lists every bout from the main event down to the prelims, with records, odds, win

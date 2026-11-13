@@ -67,8 +67,8 @@ H(CSS)
 NOTES.clear()  # notes describe this run only (engine code adds stale-cache / endpoint warnings as it goes)
 now_et = datetime.now(ET)
 today_et = now_et.date()
-SPORTS = ["NBA", "NCAAB", "NFL", "NHL", "UFC", "MIX"]
-SPORT_ICON = {"NBA": "🏀", "NCAAB": "🏀", "NFL": "🏈", "NHL": "🏒", "UFC": "🥊", "MIX": "🎟"}
+SPORTS = ["NBA", "NCAAB", "NFL", "NHL", "SOCCER", "UFC", "MIX"]
+SPORT_ICON = {"NBA": "🏀", "NCAAB": "🏀", "NFL": "🏈", "NHL": "🏒", "SOCCER": "⚽", "UFC": "🥊", "MIX": "🎟"}
 PAGE_SIZE = 12
 
 
@@ -111,8 +111,8 @@ with st.expander("⚙️  Settings", expanded=False):
         st.caption("UFC shows the current or next fight card automatically.")
         sel_date = today_et
     elif sport == "MIX":
-        st.caption("Mixed parlays use today's NBA / NHL / Top 25 college games, NFL games in the next 3 days, "
-                   "and this week's UFC card.")
+        st.caption("Mixed parlays use today's NBA / NHL / Top 25 college games, top-league soccer, NFL games in "
+                   "the next 3 days, and this week's UFC card.")
         sel_date = today_et
     else:
         sel_date = st.date_input("Week containing" if sport == "NFL" else "Slate date (ET)", value=today_et,
@@ -127,7 +127,7 @@ with st.expander("⚙️  Settings", expanded=False):
 
 
 def hero(sub: str) -> None:
-    icon = SPORT_ICON[sport] if sport == "MIX" else league_logo_html(sport, 36)
+    icon = SPORT_ICON[sport] if sport in ("MIX", "SOCCER") else league_logo_html(sport, 36)
     H(f'<div class="hero"><div class="brand">{icon}{esc(sport)} <span>Picks</span></div>'
       f'<div class="hero-sub">{sub}</div></div>')
 
@@ -152,7 +152,7 @@ def compute_slate(lg_key: str, game_ids: tuple, q: float, inj_sig: tuple, tick: 
                 profiles[tid] = teams.team_profile(lg_, tid, g["date"] or today_et)
     base = teams.league_baseline(lg_key, profiles)
     slate_day = min((g["date"] for g in _games if g["date"]), default=today_et)
-    b2b = teams.back_to_back_teams(profiles, slate_day) if teams.CFG[lg_key].get("b2b") else set()
+    b2b = teams.back_to_back_teams(profiles, slate_day) if teams.cfg(lg_key).get("b2b") else set()
     lost = {}
     for g in _games:
         for side in ("home", "away"):
@@ -201,7 +201,7 @@ def matchup_card(g: dict, p: dict | None, b2b: set[str], kind: str) -> str:
     if g["neutral"]:
         tags += '<span class="pill info">Neutral</span>'
     tip = g["tip"].strftime("%a %-I:%M %p ET") if g["tip"] is not None else ""
-    dec = 1 if kind == "hockey" else 0
+    dec = 1 if kind in ("hockey", "soccer") else 0
 
     def trow(t, proj_pts):
         rank = f'<span class="rank">#{t["rank"]}</span>' if t.get("rank") else ""
@@ -218,6 +218,8 @@ def matchup_card(g: dict, p: dict | None, b2b: set[str], kind: str) -> str:
             + trow(a, p["pts_away"] if p else None) + trow(h, p["pts_home"] if p else None))
     if not p:
         return body + '<div class="empty">Not enough completed games yet for a projection.</div></div>'
+    if kind == "soccer":
+        return body + soccer_markets(g, p) + "</div>"
     hp = p["home_win_prob"] * 100
     fav_cls_a, fav_cls_h = ("a", "h fav") if hp >= 50 else ("a fav", "h")
     body += (f'<div class="winbar"><div class="{fav_cls_a}" style="width:{100 - hp:.0f}%"></div>'
@@ -258,6 +260,95 @@ def matchup_card(g: dict, p: dict | None, b2b: set[str], kind: str) -> str:
     box3 = (f'<div class="mkt"><span class="lbl">Win</span><div class="val">{esc(fav["abbr"])} '
             f'{max(hp, 100 - hp):.0f}%</div><div class="sub">{esc(ml_sub)}</div>{ml_badge}</div>')
     return body + f'<div class="mkts">{box1}{box2}{box3}</div></div>'
+
+
+def soccer_markets(g: dict, p: dict) -> str:
+    """Three-way bar (away / draw / home) + Result, Total goals and Both-teams-score boxes."""
+    h, a, o = g["home"], g["away"], g["odds"]
+    ph, pd_, pa = p["home_win_prob"], p["draw_prob"], p["away_win_prob"]
+    top = max(ph, pd_, pa)
+    bar = (f'<div class="winbar"><div class="a{" fav" if pa == top else ""}" style="width:{pa * 100:.0f}%"></div>'
+           f'<div class="d{" fav" if pd_ == top else ""}" style="width:{pd_ * 100:.0f}%"></div>'
+           f'<div class="h{" fav" if ph == top else ""}" style="width:{ph * 100:.0f}%"></div></div>'
+           f'<div class="winlbl"><span>{esc(a["abbr"])} {pa * 100:.0f}%</span><span>Draw {pd_ * 100:.0f}%</span>'
+           f'<span>{esc(h["abbr"])} {ph * 100:.0f}%</span></div>')
+    outcomes = [(h["abbr"], ph, o.get("ml_home")), ("Draw", pd_, o.get("ml_draw")), (a["abbr"], pa, o.get("ml_away"))]
+    pick = max(outcomes, key=lambda x: x[1])
+    decs = [parlays.american_to_dec(x[2]) for x in outcomes]
+    if all(decs):
+        inv = sum(1 / d for d in decs)
+        mkt = [(1 / d) / inv for d in decs]  # vig-free three-way
+        edges = [x[1] - m for x, m in zip(outcomes, mkt)]
+        i = max(range(3), key=lambda k: edges[k])
+        lbl = "Draw" if outcomes[i][0] == "Draw" else f"{outcomes[i][0]} win"
+        r_badge = edge_badge(edges[i] * 100, 3, 7, lbl, lbl, fmt="{:.0f}%")
+        r_sub = f"Mkt {pick[0]} {mkt[outcomes.index(pick)] * 100:.0f}%"
+    else:
+        r_badge, r_sub = '<span class="badge muted">MODEL</span>', "Home · Draw · Away"
+    t_edge = (p["total"] - o["total"]) if o["total"] is not None else None
+    t_badge = edge_badge(t_edge, 0.25, 0.5, f'OVER {o["total"]}' if o["total"] else "",
+                         f'UNDER {o["total"]}' if o["total"] else "", neg_is_red=True, fmt="{:.2f}")
+    return (bar + '<div class="mkts">'
+            f'<div class="mkt"><span class="lbl">Result</span><div class="val">{esc(pick[0])} {pick[1] * 100:.0f}%</div>'
+            f'<div class="sub">{esc(r_sub)}</div>{r_badge}</div>'
+            f'<div class="mkt"><span class="lbl">Goals</span><div class="val">{p["total"]:.2f}</div>'
+            f'<div class="sub">Mkt {esc(str(o["total"]) if o["total"] is not None else "—")}</div>{t_badge}</div>'
+            f'<div class="mkt"><span class="lbl">Both score</span><div class="val">Yes {p["btts_prob"] * 100:.0f}%</div>'
+            f'<div class="sub">BTTS</div><span class="badge muted">MODEL</span></div></div>')
+
+
+def render_soccer() -> None:
+    keys = [k for k, _, _ in espn.SOCCER_LEAGUES]
+    n_sel = len(st.session_state.get("soc_leagues") or espn.SOCCER_DEFAULT)
+    with st.expander(f"🌍  Leagues ({n_sel} selected)", expanded=False):
+        picked = st.pills("Leagues", keys, selection_mode="multi", default=espn.SOCCER_DEFAULT, key="soc_leagues",
+                          format_func=lambda k: LEAGUES[k].label, label_visibility="collapsed")
+    picked = picked or espn.SOCCER_DEFAULT
+    order = {k: i for i, k in enumerate(keys)}
+    games, failed = [], []
+    with st.spinner("Loading fixtures…"):
+        for k in picked:
+            try:
+                for g in fetch_games(k, sel_date):
+                    g["league"] = k
+                    games.append(g)
+            except Exception:
+                failed.append(LEAGUES[k].label)
+    if failed:
+        NOTES["soccer"] = f"No ESPN fixtures feed for: {', '.join(failed)}."
+    games.sort(key=lambda g: (order[g["league"]], g["tip"] is None, g["tip"] or 0))
+    hero(f'{sel_date:%a, %b %d}<br>{len(games)} match{"es" if len(games) != 1 else ""}')
+    if not games:
+        empty_card("No matches in the selected leagues on this date.", "Add leagues above or pick another date.")
+        return
+    if len(games) > PAGE_SIZE:
+        pages = (len(games) + PAGE_SIZE - 1) // PAGE_SIZE
+        n = len(games)
+        page = st.selectbox("Page", list(range(1, pages + 1)), key="page_SOCCER", label_visibility="collapsed",
+                            format_func=lambda i: f"Matches {(i - 1) * PAGE_SIZE + 1}–{min(i * PAGE_SIZE, n)} of {n}")
+        games = games[(page - 1) * PAGE_SIZE: page * PAGE_SIZE]
+    slates = {}
+    for k in sorted({g["league"] for g in games}, key=order.get):
+        slates[k], _ = load_team_data(k, [g for g in games if g["league"] == k])
+
+    tab_m, tab_p = st.tabs(["🎯 Matchups", "🎟 Parlays"])
+    with tab_m:
+        note("Poisson goal model from each club's goals for/against (season + last 5, home edge). Bar = away · "
+             "draw · home win chances; badges compare with ESPN's three-way odds and goal total.")
+        html, cur = [], None
+        for g in games:
+            if g["league"] != cur:
+                cur = g["league"]
+                html.append(f'<div class="seg-head">{league_logo_html(cur, 22)} {esc(LEAGUES[cur].label)}</div>')
+            html.append(matchup_card(g, slates[cur]["projections"].get(g["id"]), set(), "soccer"))
+        H("".join(html))
+    with tab_p:
+        legs = []
+        for k, sl in slates.items():
+            legs += parlays.game_legs(k, "soccer", [g for g in games if g["league"] == k], sl["projections"])
+        note("Soccer legs: match result (home / draw / away, priced from ESPN's three-way odds) and goal totals at "
+             "-110. Hit chances blend the model (60%) with the market (40%). One leg per match. Not betting advice.")
+        render_parlays(legs)
 
 
 def prop_edge(r: dict, m: str, book: tuple | None) -> float:
@@ -827,6 +918,23 @@ def render_mixed() -> None:
         except Exception as e:
             coverage.append(f"{sk}: unavailable ({type(e).__name__})")
     try:
+        soc_games, soc_legs = 0, 0
+        for k in espn.SOCCER_DEFAULT:
+            try:
+                gs = [g for g in fetch_games(k, today_et) if g["state"] == "pre"][:PAGE_SIZE]
+            except Exception:
+                continue
+            if not gs:
+                continue
+            sl, _ = load_team_data(k, gs)
+            lk = parlays.game_legs(k, "soccer", gs, sl["projections"])
+            legs += lk
+            soc_games, soc_legs = soc_games + len(gs), soc_legs + len(lk)
+        coverage.append(f"Soccer: {soc_games} match{'es' if soc_games != 1 else ''} · {soc_legs} legs"
+                        if soc_games else "Soccer: no matches today in the top leagues")
+    except Exception as e:
+        coverage.append(f"Soccer: unavailable ({type(e).__name__})")
+    try:
         cards = ufc.fight_cards(today_et)
         card = next((c for c in cards if c["state"] != "post" and c["date"]
                      and (c["date"] - today_et).days <= 7), None)
@@ -857,6 +965,8 @@ try:
         render_ufc()
     elif sport == "MIX":
         render_mixed()
+    elif sport == "SOCCER":
+        render_soccer()
     else:
         render_team_sport()
 except Exception as e:  # last line of defence: never a crashed page

@@ -57,7 +57,7 @@ justify-content:center;font-size:.62rem;font-weight:800;color:var(--muted);flex:
 text-transform:uppercase}
 .tproj .num{font-weight:800;font-size:1.15rem;color:var(--green)}
 .winbar{display:flex;height:6px;border-radius:999px;overflow:hidden;background:var(--card2);margin:8px 0 4px}
-.winbar .a,.winbar .h{background:#64748b}.winbar .fav{background:var(--green)}
+.winbar .a,.winbar .h{background:#64748b}.winbar .d{background:#3b4656}.winbar .fav{background:var(--green)}
 .winlbl{display:flex;justify-content:space-between;color:var(--muted);font-size:.7rem;margin-bottom:10px}
 .mkts{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
 .mkt{background:var(--card2);border:1px solid var(--line);border-radius:12px;padding:9px 8px;text-align:center}
@@ -104,6 +104,7 @@ border-top:1px solid var(--line)}
 div[data-testid="stExpander"]{background:var(--card);border:1px solid var(--line);border-radius:14px}
 @media (max-width:420px){.mkt .val{font-size:.92rem}.pbox .num{font-size:.95rem}.brand{font-size:1.25rem}}
 .rank{color:var(--amber);font-size:.72rem;font-weight:800;margin-right:5px}
+.seg-head .lglogo{display:inline-flex}
 .seg-head{color:var(--muted);font-size:.72rem;font-weight:800;letter-spacing:.09em;text-transform:uppercase;
 margin:16px 4px 8px;display:flex;align-items:center;gap:8px}
 .seg-head:after{content:"";flex:1;height:1px;background:var(--line)}
@@ -194,7 +195,7 @@ def avatar_html(url: str, name: str, size: int = 54) -> str:
     return f'<div class="avatar"{style}><span>{esc(initials)}</span>{img}</div>'
 
 
-LEAGUE_EMOJI = {"NBA": "🏀", "NCAAB": "🏀", "NFL": "🏈", "NHL": "🏒", "UFC": "🥊"}
+LEAGUE_EMOJI = {"NBA": "🏀", "NCAAB": "🏀", "NFL": "🏈", "NHL": "🏒", "UFC": "🥊", "Soccer": "⚽"}
 
 
 def league_logo_html(sport: str, size: int = 34) -> str:
@@ -204,7 +205,7 @@ def league_logo_html(sport: str, size: int = 34) -> str:
     url = LEAGUE_LOGOS.get(sport, "")
     img = f'<div class="lg-img" style="background-image:url(\'{esc(url)}\')"></div>' if url else ""
     return (f'<div class="lglogo" style="width:{size}px;height:{size}px" title="{esc(sport)}">'
-            f'<span>{LEAGUE_EMOJI.get(sport, "")}</span>{img}</div>')
+            f'<span>{LEAGUE_EMOJI.get(sport, "⚽")}</span>{img}</div>')
 
 
 def edge_badge(edge, lean: float, strong: float, pos: str, neg: str, neg_is_red: bool = False, fmt: str = "{:.1f}") -> str:

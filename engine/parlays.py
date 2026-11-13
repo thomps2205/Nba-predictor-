@@ -27,6 +27,8 @@ PROP_SD_FLOOR = {"PTS": 4.5, "REB": 2.2, "AST": 1.8, "PRA": 6.0, "PASS": 45.0, "
 
 MODEL_WEIGHT = 0.6      # leg probability = 60% model + 40% market (no-vig)
 MIN_PROB = 0.55
+# Soccer's three-way result spreads probability over home / draw / away, so value picks often sit at 40-50%.
+MIN_BY_MARKET = {"Result": (0.40, 0.03)}  # market -> (min hit chance, min edge)
 MIN_EDGE = 0.02
 MAX_POOL = 16
 
@@ -113,6 +115,21 @@ def game_legs(sport: str, kind: str, games: list[dict], projections: dict) -> li
                        logo=a.get("logo", ""), logo2=h.get("logo", ""), fallback=f'{a["abbr"]}/{h["abbr"]}')
 
         cands: list[Leg] = []
+        if kind == "soccer":
+            # three-way result market (home / draw / away) + goal totals from the Poisson grid
+            dh, dd, da = (american_to_dec(o.get("ml_home")), american_to_dec(o.get("ml_draw")),
+                          american_to_dec(o.get("ml_away")))
+            if dh and dd and da:
+                inv = 1 / dh + 1 / dd + 1 / da
+                cands += [leg(f'{_name(h)} to win', "Result", p["home_win_prob"], dh, (1 / dh) / inv, h),
+                          leg("Draw", "Result", p["draw_prob"], dd, (1 / dd) / inv),
+                          leg(f'{_name(a)} to win', "Result", p["away_win_prob"], da, (1 / da) / inv, a)]
+            if o["total"] is not None:
+                _, p_over = _hockey_probs(p["pts_home"], p["pts_away"], o["total"])
+                cands += [leg(f'Over {o["total"]} goals', "Total", p_over, STD_DEC, 0.5),
+                          leg(f'Under {o["total"]} goals', "Total", 1 - p_over, STD_DEC, 0.5)]
+            legs += cands
+            continue
         if kind == "hockey":
             win_h, p_over = _hockey_probs(p["pts_home"], p["pts_away"], o["total"])
             if p_over is not None:
@@ -218,9 +235,12 @@ def ufc_legs(card: dict, bouts: list[dict]) -> list[Leg]:
 
 
 def value_legs(legs: list[Leg]) -> list[Leg]:
-    """Legs worth considering: likely enough and priced below the model probability. Best leg per game first."""
-    good = sorted((l for l in legs if l.prob >= MIN_PROB and l.edge >= MIN_EDGE), key=lambda l: -l.edge)
-    return good
+    """Legs worth considering: likely enough and priced below the calibrated probability, best edges first."""
+    def ok(l: Leg) -> bool:
+        min_p, min_e = MIN_BY_MARKET.get(l.market, (MIN_PROB, MIN_EDGE))
+        return l.prob >= min_p and l.edge >= min_e
+
+    return sorted((l for l in legs if ok(l)), key=lambda l: -l.edge)
 
 
 def _combos(pool: list[Leg], n: int, mixed: bool, all_sports: bool = False, props_mix: bool = False) -> list[dict]:

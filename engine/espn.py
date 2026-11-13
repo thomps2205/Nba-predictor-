@@ -39,6 +39,21 @@ LEAGUES = {
     "UFC": League("UFC", "mma", "ufc", "mma", "UFC", False),
 }
 
+# Soccer competitions from around the world (ESPN league slugs). Key = short tag shown on cards.
+SOCCER_LEAGUES = [
+    ("EPL", "eng.1", "Premier League"), ("LALIGA", "esp.1", "LaLiga"), ("BUNDES", "ger.1", "Bundesliga"),
+    ("SERIEA", "ita.1", "Serie A"), ("LIGUE1", "fra.1", "Ligue 1"), ("UCL", "uefa.champions", "Champions League"),
+    ("UEL", "uefa.europa", "Europa League"), ("UECL", "uefa.europa.conf", "Conference League"),
+    ("MLS", "usa.1", "MLS"), ("LIGAMX", "mex.1", "Liga MX"), ("EREDIV", "ned.1", "Eredivisie"),
+    ("PRIMEIRA", "por.1", "Primeira Liga"), ("CHAMP", "eng.2", "Championship"), ("SPFL", "sco.1", "Scottish Prem"),
+    ("BRASIL", "bra.1", "Brasileirão"), ("ARG", "arg.1", "Argentina Primera"), ("SAUDI", "ksa.1", "Saudi Pro League"),
+    ("J1", "jpn.1", "J1 League"), ("SUPERLIG", "tur.1", "Süper Lig"), ("LIBERT", "conmebol.libertadores",
+                                                                       "Libertadores"),
+]
+SOCCER_DEFAULT = ["EPL", "LALIGA", "BUNDES", "SERIEA", "LIGUE1", "UCL", "MLS"]
+for _k, _slug, _name in SOCCER_LEAGUES:
+    LEAGUES[_k] = League(_k, "soccer", _slug, "soccer", _name, False)
+
 
 def _base(lg: League) -> str:
     return f"{SITE}/{lg.sport}/{lg.league}"
@@ -111,7 +126,7 @@ def _rank(c: dict) -> int | None:
 def _odds(comp: dict, home_abbr: str, away_abbr: str) -> dict:
     o = (comp.get("odds") or [{}])[0] or {}
     out = {"details": (o.get("details") or "").strip(), "total": None, "spread_home": None,
-           "ml_home": None, "ml_away": None}
+           "ml_home": None, "ml_away": None, "ml_draw": None}
     t = num(o.get("overUnder"), default=float("nan"))
     out["total"] = None if t != t or t <= 0 else t
     d = out["details"]
@@ -131,6 +146,11 @@ def _odds(comp: dict, home_abbr: str, away_abbr: str) -> dict:
             ml = (((o.get("moneyline") or {}).get(side) or {}).get("close") or {}).get("odds")
         if ml is not None and abs(num(ml)) >= 100:
             out[f"ml_{side}"] = num(ml)
+    ml = (o.get("drawOdds") or {}).get("moneyLine")  # soccer three-way market
+    if ml is None:
+        ml = (((o.get("moneyline") or {}).get("draw") or {}).get("close") or {}).get("odds")
+    if ml is not None and abs(num(ml)) >= 100:
+        out["ml_draw"] = num(ml)
     return out
 
 
