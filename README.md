@@ -69,6 +69,15 @@ streamlit run app.py
   * Basketball: PTS / REB / AST / PRA.
   * NFL: passing, rushing and receiving yards, and receptions.
   * NHL: goals (with anytime-goal %), assists, shots and points.
+* **Parlays** appear as a tab in every sport, plus a **MIX** view in the sport switcher that combines today's
+  legs from all five sports.
+  * Each leg's hit chance blends the model (60%) with the market's no-vig probability (40%). Spreads, totals
+    and moneylines come from ESPN's lines. Props are included only where PrizePicks / Underdog posts a line.
+    UFC legs need an ESPN moneyline.
+  * Parlays use at most one leg per game, so legs stay independent. The cards are: safest 2-leg, best-value
+    3-leg and longshot 4-leg (MIX adds a 3-leg with every leg from a different sport).
+  * Each card shows hit chance, estimated odds (ESPN moneylines, -110 spreads/totals, -115 pick'em props), fair
+    odds and expected value.
 * **Injuries** (NBA, NFL, NHL) shows ESPN's report for every team on the slate.
 * **UFC:**
   * **Fight Card** lists every bout from the main event down to the prelims, with records, odds, win

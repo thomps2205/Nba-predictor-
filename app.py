@@ -17,9 +17,9 @@ from datetime import date, datetime, timedelta
 import pandas as pd
 import streamlit as st
 
-from engine import espn, lines as linesmod, news as newsmod, props as propmod, teams, ufc, ufcstats
+from engine import espn, lines as linesmod, news as newsmod, parlays, props as propmod, teams, ufc, ufcstats
 from engine.common import ET, NOTES, cache_fresh, clear_disk_cache, fmt_spread, ml_to_prob, norm_name
-from engine.espn import LEAGUES
+from engine.espn import LEAGUES, League
 from engine.ui import CSS, H, avatar_html, edge_badge, empty_card, esc, logo_html, note, status_pill
 
 st.set_page_config(page_title="Sharp Board", page_icon="🏆", layout="centered", initial_sidebar_state="collapsed")
@@ -28,8 +28,8 @@ H(CSS)
 NOTES.clear()  # notes describe this run only (engine code adds stale-cache / endpoint warnings as it goes)
 now_et = datetime.now(ET)
 today_et = now_et.date()
-SPORTS = ["NBA", "NCAAB", "NFL", "NHL", "UFC"]
-SPORT_ICON = {"NBA": "🏀", "NCAAB": "🏀", "NFL": "🏈", "NHL": "🏒", "UFC": "🥊"}
+SPORTS = ["NBA", "NCAAB", "NFL", "NHL", "UFC", "MIX"]
+SPORT_ICON = {"NBA": "🏀", "NCAAB": "🏀", "NFL": "🏈", "NHL": "🏒", "UFC": "🥊", "MIX": "🎟"}
 PAGE_SIZE = 12
 
 
@@ -65,11 +65,15 @@ sport = st.segmented_control("Sport", SPORTS, default="NBA", key="sport_pick",
 if sport is None:  # tapping the active button deselects it; keep the last sport
     sport = st.session_state.get("last_sport", "NBA")
 st.session_state["last_sport"] = sport
-lg = LEAGUES[sport]
+lg = LEAGUES.get(sport)  # None for the mixed-parlay view
 
 with st.expander("⚙️  Settings", expanded=False):
     if sport == "UFC":
         st.caption("UFC shows the current or next fight card automatically.")
+        sel_date = today_et
+    elif sport == "MIX":
+        st.caption("Mixed parlays use today's NBA / NHL / Top 25 college games, NFL games in the next 3 days, "
+                   "and this week's UFC card.")
         sel_date = today_et
     else:
         sel_date = st.date_input("Week containing" if sport == "NFL" else "Slate date (ET)", value=today_et,
@@ -272,14 +276,56 @@ def prop_card(r: dict, m: str, label: str, kind: str, b2b_ids: set[str], book: t
     )
 
 
+def fetch_games(sk: str, d: date) -> list[dict]:
+    lg_ = LEAGUES[sk]
+    if sk == "NFL":
+        start, days = nfl_week_window(d)
+        return espn.week_games(lg_, start, days, today_et)
+    return espn.parse_games(lg_, espn.scoreboard(lg_, d, today_et))
+
+
+def load_team_data(sk: str, games: list[dict]) -> tuple[dict, list[dict]]:
+    """Injuries + team profiles (prefetched behind a progress bar) + cached slate projections."""
+    lg_ = LEAGUES[sk]
+    try:
+        inj = espn.injuries(lg_)
+    except Exception as e:
+        inj = []
+        NOTES[f"injuries {sk}"] = f"{sk} injury report unavailable ({e})."
+    reqs, seen = [], set()
+    for g in games:
+        for side in ("home", "away"):
+            tid = g[side]["id"]
+            if tid and tid not in seen:
+                seen.add(tid)
+                reqs += teams.needed_requests(lg_, tid)
+    fails = prefetch(reqs, f"Loading {sk} team stats")
+    if fails:
+        NOTES[f"teams {sk}"] = (f"{fails} {sk} team request(s) failed; affected teams use a simpler points-only "
+                                "model or show no projection.")
+    inj_sig = tuple((i["team_id"], i["key"], i["status"]) for i in inj)
+    with st.spinner(f"Crunching {sk} projections…"):
+        slate = compute_slate(sk, tuple(g["id"] for g in games), float(q_sit), inj_sig, bucket(), games, inj)
+    return slate, inj
+
+
+def prefetch_players(lg_: League, g: dict) -> None:
+    """Rosters, every prop candidate's game log, and NHL season-stat fallbacks for one game (cached)."""
+    prefetch([(f"roster|{lg_.key}|{g[s]['id']}", espn.TTL_ROSTER, lambda s=s: espn.team_roster(lg_, g[s]["id"]))
+              for s in ("away", "home")], "Loading rosters")
+    cands = [a for s in ("away", "home") for a in propmod.candidates(lg_, g[s]["id"])]
+    prefetch([(espn.gamelog_key(lg_, a["id"]), espn.TTL_GAMELOG, lambda a=a: espn.athlete_gamelog(lg_, a["id"]))
+              for a in cands], "Loading player game logs")
+    if lg_.kind == "hockey":
+        prefetch([(espn.athlete_stats_key(lg_, a["id"]), espn.TTL_ROSTER,
+                   lambda a=a: espn.athlete_stats(lg_, a["id"]))
+                  for a in cands if espn.needs_hockey_fallback(lg_, a["id"], g["date"])], "Loading season stats")
+
+
 def render_team_sport() -> None:
     try:
         with st.spinner("Loading schedule…"):
-            if sport == "NFL":
-                start, days = nfl_week_window(sel_date)
-                games = espn.week_games(lg, start, days, today_et)
-            else:
-                games = espn.parse_games(lg, espn.scoreboard(lg, sel_date, today_et))
+            games = fetch_games(sport, sel_date)
     except Exception as e:
         hero(f"{sel_date:%a, %b %d}")
         empty_card("Couldn't load the ESPN schedule.", str(e))
@@ -307,37 +353,20 @@ def render_team_sport() -> None:
                             format_func=lambda i: f"Games {(i - 1) * PAGE_SIZE + 1}–{min(i * PAGE_SIZE, n)} of {n}")
         games = games[(page - 1) * PAGE_SIZE: page * PAGE_SIZE]
 
-    try:
-        inj = espn.injuries(lg)
-    except Exception as e:
-        inj = []
-        NOTES[f"injuries {sport}"] = f"Injury report unavailable ({e})."
-    reqs, seen = [], set()
-    for g in games:
-        for side in ("home", "away"):
-            tid = g[side]["id"]
-            if tid and tid not in seen:
-                seen.add(tid)
-                reqs += teams.needed_requests(lg, tid)
-    fails = prefetch(reqs, "Loading team stats")
-    if fails:
-        NOTES[f"teams {sport}"] = (f"{fails} team request(s) failed; affected teams use a simpler points-only "
-                                   "model or show no projection.")
-
-    inj_sig = tuple((i["team_id"], i["key"], i["status"]) for i in inj)
-    with st.spinner("Crunching projections…"):
-        slate = compute_slate(sport, tuple(g["id"] for g in games), float(q_sit), inj_sig, bucket(), games, inj)
+    slate, inj = load_team_data(sport, games)
     projections, b2b = slate["projections"], slate["b2b"]
 
-    tabs = st.tabs(["🎯 Matchups", "📊 Player Props"] + (["🩹 Injuries"] if lg.has_injuries else []))
+    tabs = st.tabs(["🎯 Matchups", "📊 Player Props", "🎟 Parlays"] + (["🩹 Injuries"] if lg.has_injuries else []))
     with tabs[0]:
         note("Model line vs. market. Spread/ML badges name the side the model likes; total badges show the "
              "over/under lean. Number = edge in points (win-probability points for ML).")
         H("".join(matchup_card(g, projections.get(g["id"]), b2b, lg.kind) for g in games))
     with tabs[1]:
         props_fragment(games, slate, inj)
+    with tabs[2]:
+        parlay_fragment(games, slate, inj)
     if lg.has_injuries:
-        with tabs[2]:
+        with tabs[3]:
             render_injuries(games, inj)
 
 
@@ -355,14 +384,7 @@ def props_fragment(games: list[dict], slate: dict, inj: list[dict]) -> None:
                        label_visibility="collapsed")
     g = next(x for x in playable if x["id"] == gid)
 
-    prefetch([(f"roster|{lg.key}|{g[s]['id']}", espn.TTL_ROSTER, lambda s=s: espn.team_roster(lg, g[s]["id"]))
-              for s in ("away", "home")], "Loading rosters")
-    cands = [a for s in ("away", "home") for a in propmod.candidates(lg, g[s]["id"])]
-    prefetch([(espn.gamelog_key(lg, a["id"]), espn.TTL_GAMELOG, lambda a=a: espn.athlete_gamelog(lg, a["id"]))
-              for a in cands], "Loading player game logs")
-    if lg.kind == "hockey":  # empty NHL game logs -> season stats endpoint
-        prefetch([(espn.athlete_stats_key(lg, a["id"]), espn.TTL_ROSTER, lambda a=a: espn.athlete_stats(lg, a["id"]))
-                  for a in cands if espn.needs_hockey_fallback(lg, a["id"], g["date"])], "Loading season stats")
+    prefetch_players(lg, g)
 
     df = compute_props(lg.key, gid, float(q_sit), bucket(), g, slate["projections"][gid], slate["profiles"],
                        slate["base"], slate["b2b"], inj)
@@ -507,6 +529,11 @@ def render_ufc() -> None:
         card = cards[0]
     hero((f'{card["date"]:%a, %b %d}<br>' if card["date"] else "") + f'{len(card["bouts"])} bouts')
 
+    bouts = load_card(card)
+    render_card_tabs(card, bouts)
+
+
+def load_card(card: dict) -> list[dict]:
     ids = [f["id"] for b in card["bouts"] for f in b["fighters"] if f["id"]]
     fails = prefetch([(f"fighter|{fid}", ufc.TTL_FIGHTER, lambda fid=fid: ufc.prefetch_fighter(fid)) for fid in ids],
                      "Loading fighter profiles")
@@ -519,8 +546,10 @@ def render_ufc() -> None:
     if missing:
         NOTES["ufcstats"] = f"UFCStats.com had no match for {missing} of {len(names)} fighters (debuts or unreachable)."
     with st.spinner("Projecting bouts…"):
-        bouts = compute_card(card["id"], bucket(), card)
+        return compute_card(card["id"], bucket(), card)
 
+
+def render_card_tabs(card: dict, bouts: list[dict]) -> None:
     status = {"in": '<span class="pill live">● LIVE</span>', "post": '<span class="pill final">Final</span>'}.get(
         card["state"], '<span class="pill info">Upcoming</span>')
     start = card["start"].strftime("%a %b %-d · %-I:%M %p ET") if card["start"] is not None else ""
@@ -528,7 +557,7 @@ def render_ufc() -> None:
       f'<div class="psub">{esc(start)}{" · " + esc(card["venue"]) if card["venue"] else ""}</div></div>'
       f'{status}</div></div>')
 
-    tab_card, tab_bd = st.tabs(["🥊 Fight Card", "🔍 Fight Breakdowns"])
+    tab_card, tab_bd, tab_pl = st.tabs(["🥊 Fight Card", "🔍 Fight Breakdowns", "🎟 Parlays"])
     with tab_card:
         note("Win % blends the model (record, experience, reach, age, striking and grappling rates) with the "
              "betting market when ESPN lists odds. Method = most likely way the pick wins.")
@@ -542,6 +571,10 @@ def render_ufc() -> None:
         H("".join(html) if html else '<div class="card"><div class="empty">No bouts listed yet.</div></div>')
     with tab_bd:
         breakdown_fragment(bouts)
+    with tab_pl:
+        legs = parlays.ufc_legs(card, bouts)
+        note("Fight legs need a moneyline from ESPN; bouts without odds are left out.")
+        render_parlays(legs)
 
 
 @st.fragment
@@ -630,11 +663,138 @@ def breakdown_fragment(bouts: list[dict]) -> None:
 
 
 # --------------------------------------------------------------------------
+# Parlays
+# --------------------------------------------------------------------------
+LEG_ICON = {"NBA": "🏀", "NCAAB": "🏀", "NFL": "🏈", "NHL": "🏒", "UFC": "🥊"}
+
+
+def leg_html(l: parlays.Leg) -> str:
+    sub = " · ".join(x for x in (l.matchup, l.market, l.when, l.note) if x)
+    return (f'<div class="leg"><span class="sp">{LEG_ICON.get(l.sport, "")} {esc(l.sport)}</span>'
+            f'<div class="lg-main"><div class="lg-pick">{esc(l.pick)}</div><div class="lg-sub">{esc(sub)}</div></div>'
+            f'<div class="lg-p"><span class="lbl">Hit</span>{l.prob * 100:.0f}%</div></div>')
+
+
+def parlay_card(pl: dict) -> str:
+    ev = pl["ev"] * 100
+    tag_cls = {"SAFE": "strong", "VALUE": "lean", "LONGSHOT": "muted", "MIXED": "strong"}.get(pl["tag"], "lean")
+    sports = sorted({l.sport for l in pl["legs"]})
+    return (f'<div class="card"><div class="ghead"><div class="pl-title">{esc(pl["title"])}'
+            f'<div class="psub">{len(pl["legs"])} legs · {esc(" + ".join(sports))}</div></div>'
+            f'<span class="badge {tag_cls}">{esc(pl["tag"])}</span></div>'
+            + "".join(leg_html(l) for l in pl["legs"])
+            + '<div class="pgrid" style="margin:10px 0 0">'
+            f'<div class="pbox hl"><span class="lbl">Hit chance</span><div class="num">{pl["prob"] * 100:.0f}%</div></div>'
+            f'<div class="pbox"><span class="lbl">Est. odds</span><div class="num">{parlays.dec_to_american(pl["dec"])}</div></div>'
+            f'<div class="pbox"><span class="lbl">Fair odds</span><div class="num">{parlays.dec_to_american(1 / pl["prob"])}</div></div>'
+            f'<div class="pbox"><span class="lbl">EV</span><div class="num" style="color:'
+            f'{"var(--green)" if ev > 0 else "var(--red)"}">{ev:+.0f}%</div></div></div></div>')
+
+
+def render_parlays(legs: list[parlays.Leg], mixed: bool = False) -> None:
+    pool = parlays.value_legs(legs)
+    if not pool:
+        empty_card("No value legs right now.",
+                   f"Checked {len(legs)} priced legs; none clear {parlays.MIN_PROB:.0%} hit chance with a "
+                   f"{parlays.MIN_EDGE:.0%}+ edge over the price. Check back when more lines are posted.")
+        return
+    built = parlays.build(legs, mixed=mixed)
+    if not built:
+        empty_card("Not enough independent value legs for a parlay yet.",
+                   "Parlays use at most one leg per game" + (" and need legs from 2+ sports." if mixed else "."))
+    H("".join(parlay_card(p) for p in built))
+    H('<div class="seg-head">Top value legs</div>'
+      + '<div class="card">' + "".join(leg_html(l) + f'<div class="lg-edge">Edge {l.edge * 100:+.1f}% vs '
+                                       f'{parlays.dec_to_american(l.dec)}</div>' for l in pool[:10]) + "</div>")
+
+
+def gather_prop_legs(sk: str, games: list[dict], slate: dict, inj: list[dict], load_all: bool) -> list:
+    lg_ = LEAGUES[sk]
+    book = cached_lines(sk, bucket(5))
+    if not book:
+        return []
+    labels = dict(propmod.MARKETS[lg_.kind])
+    legs = []
+    for g in games:
+        if g["id"] not in slate["projections"] or g["state"] != "pre":
+            continue
+        if load_all:
+            prefetch_players(lg_, g)
+        elif not all(cache_fresh(f"roster|{sk}|{g[s]['id']}", espn.TTL_ROSTER) for s in ("away", "home")):
+            continue  # props for this game haven't been loaded yet
+        try:
+            df = compute_props(sk, g["id"], float(q_sit), bucket(), g, slate["projections"][g["id"]],
+                               slate["profiles"], slate["base"], slate["b2b"], inj)
+            legs += parlays.prop_legs(sk, lg_.kind, g, df, book, norm_name, labels)
+        except Exception as e:
+            NOTES[f"prop legs {sk}"] = f"{sk} prop legs skipped for a game ({type(e).__name__})."
+    return legs
+
+
+@st.fragment
+def parlay_fragment(games: list[dict], slate: dict, inj: list[dict]) -> None:
+    load_all = st.toggle("Include player props from every game (loads all player logs the first time)",
+                         key=f"pl_props_{sport}")
+    legs = parlays.game_legs(sport, lg.kind, games, slate["projections"])
+    legs += gather_prop_legs(sport, games, slate, inj, load_all)
+    note("Each leg's hit chance blends the model (60%) with the market (40%); prices are ESPN moneylines, -110 for spreads/totals and "
+         "-115 for PrizePicks / Underdog prop lines. Legs are treated as independent (one per game), so real "
+         "parlay odds may differ. Not betting advice.")
+    render_parlays(legs)
+
+
+def render_mixed() -> None:
+    hero(f"{today_et:%a, %b %d}<br>All sports")
+    load_all = st.toggle("Include player props from every game (slow the first time)", key="mix_props")
+    legs, coverage = [], []
+    for sk in ("NBA", "NCAAB", "NFL", "NHL"):
+        try:
+            with st.spinner(f"Loading {sk}…"):
+                games = fetch_games(sk, today_et)
+            if sk == "NFL":
+                games = [g for g in games if g["date"] and 0 <= (g["date"] - today_et).days <= 3]
+            elif sk == "NCAAB":
+                games = [g for g in games if g["home"]["rank"] or g["away"]["rank"]]
+            games = [g for g in games if g["state"] == "pre"][:PAGE_SIZE]
+            if not games:
+                coverage.append(f"{sk}: no upcoming games")
+                continue
+            slate, inj = load_team_data(sk, games)
+            sl = parlays.game_legs(sk, LEAGUES[sk].kind, games, slate["projections"])
+            sl += gather_prop_legs(sk, games, slate, inj, load_all)
+            legs += sl
+            coverage.append(f"{sk}: {len(games)} game{'s' if len(games) != 1 else ''} · {len(sl)} legs")
+        except Exception as e:
+            coverage.append(f"{sk}: unavailable ({type(e).__name__})")
+    try:
+        cards = ufc.fight_cards(today_et)
+        card = next((c for c in cards if c["state"] != "post" and c["date"]
+                     and (c["date"] - today_et).days <= 7), None)
+        if card:
+            ul = parlays.ufc_legs(card, load_card(card))
+            legs += ul
+            coverage.append(f"UFC: {card['name']} · {len(ul)} legs")
+        else:
+            coverage.append("UFC: no card this week")
+    except Exception as e:
+        coverage.append(f"UFC: unavailable ({type(e).__name__})")
+    H('<div class="card"><div class="sub-h" style="margin-top:0">Today\'s board</div>'
+      + "".join(f'<div class="factor"><span>{esc(c.split(":")[0])}</span><span class="v">'
+                f'{esc(c.split(":", 1)[1].strip())}</span></div>' for c in coverage) + "</div>")
+    note("Mixed parlays combine the best value legs across sports (one leg per game, legs from 2+ sports). "
+         "Hit chances blend each sport's model (60%) with the market (40%); prices are ESPN moneylines, -110 spreads/totals and -115 "
+         "pick'em props. Not betting advice.")
+    render_parlays(legs, mixed=True)
+
+
+# --------------------------------------------------------------------------
 # Route
 # --------------------------------------------------------------------------
 try:
     if sport == "UFC":
         render_ufc()
+    elif sport == "MIX":
+        render_mixed()
     else:
         render_team_sport()
 except Exception as e:  # last line of defence: never a crashed page
