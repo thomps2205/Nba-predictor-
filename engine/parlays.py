@@ -209,24 +209,43 @@ def _combos(pool: list[Leg], n: int, mixed: bool, all_sports: bool = False) -> l
     return out
 
 
-def build(legs: list[Leg], sizes=(2, 3, 4), mixed: bool = False) -> list[dict]:
+def _greedy(pool: list[Leg], n: int, mixed: bool) -> list[dict]:
+    """Max-EV n-leg parlay without enumerating combinations: EV = prod(p_i * dec_i) - 1, so with one leg per
+    game the optimum is the best leg of each game, then the n games whose best leg has the highest p * dec."""
+    best: dict[tuple[str, str], Leg] = {}
+    for l in pool:
+        k = (l.sport, l.game_id)
+        if k not in best or l.prob * l.dec > best[k].prob * best[k].dec:
+            best[k] = l
+    pick = sorted(best.values(), key=lambda l: -l.prob * l.dec)[:n]
+    if len(pick) < n or (mixed and len({l.sport for l in pick}) < 2):
+        return []
+    p = math.prod(l.prob for l in pick)
+    dec = math.prod(l.dec for l in pick)
+    return [{"legs": pick, "prob": p, "dec": dec, "ev": p * dec - 1, "n_sports": len({l.sport for l in pick})}]
+
+
+def build(legs: list[Leg], sizes=(2, 3, 4, 6), mixed: bool = False) -> list[dict]:
     """Best parlays, chosen in order (safest 2-leg by hit probability; for mixed, a 3-leg with every leg from a
     different sport; best-value 3-leg and longshot 4-leg by EV). No game is reused across parlays, so the same
     spread / total / pick never appears on two cards."""
-    pool = value_legs(legs)[:MAX_POOL * (2 if mixed else 1)]
+    full = value_legs(legs)
+    pool = full[:MAX_POOL * (2 if mixed else 1)]  # capped for the combination search; greedy uses `full`
     used: set[tuple[str, str]] = set()
     pre = "Mixed " if mixed else ""
     plan = [(2, f"{pre}safest 2-leg".capitalize(), "SAFE", "prob", False)]
     if mixed:
         plan.append((3, "One leg per sport (3 sports)", "MIXED", "ev", True))
     plan += [(3, f"{pre}best value 3-leg".capitalize(), "VALUE", "ev", False),
-             (4, f"{pre}longshot 4-leg".capitalize(), "LONGSHOT", "ev", False)]
+             (4, f"{pre}longshot 4-leg".capitalize(), "LONGSHOT", "ev", False),
+             (6, f"{pre}6-leg moonshot".capitalize(), "6-LEG", "ev", False)]
     out = []
     for n, title, tag, key, all_sports in plan:
         if n not in sizes:
             continue
-        avail = [l for l in pool if (l.sport, l.game_id) not in used]
-        combos = _combos(avail, n, mixed, all_sports)
+        src = full if n >= 5 else pool
+        avail = [l for l in src if (l.sport, l.game_id) not in used]
+        combos = _greedy(avail, n, mixed) if n >= 5 else _combos(avail, n, mixed, all_sports)
         if not combos:
             continue
         if key == "prob":
