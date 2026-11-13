@@ -52,8 +52,6 @@ def scoreboard(lg: League, d: date | None, today: date, days: int = 1) -> dict:
     params: dict = {}
     if lg.key == "NCAAB":
         params.update(groups="50", limit="500")
-    elif lg.kind in ("football", "hockey", "basketball"):
-        params["limit"] = "300"
     if d is not None:
         end = d + timedelta(days=days - 1)
         params["dates"] = d.strftime("%Y%m%d") if days == 1 else f"{d:%Y%m%d}-{end:%Y%m%d}"
@@ -62,6 +60,34 @@ def scoreboard(lg: League, d: date | None, today: date, days: int = 1) -> dict:
         ttl = TTL_SCOREBOARD_LIVE
     key = f"scoreboard|{lg.key}|{params.get('dates', 'current')}"
     return disk_cached(key, ttl, lambda: http_json(f"{_base(lg)}/scoreboard", params))
+
+
+def week_games(lg: League, start: date, days: int, today: date) -> list[dict]:
+    """All games in [start, start+days). ESPN rejects some date-range queries (NFL), so fall back to the
+    default current-week scoreboard, then to one single-day request per day. Never raises."""
+    end = start + timedelta(days=days)
+    in_window = lambda g: g["date"] is not None and start <= g["date"] < end  # noqa: E731
+    try:
+        games = [g for g in parse_games(lg, scoreboard(lg, start, today, days)) if in_window(g)]
+        if games:
+            return games
+    except Exception:
+        pass
+    if start <= today < end:
+        try:
+            games = [g for g in parse_games(lg, scoreboard(lg, None, today)) if in_window(g)]
+            if games:
+                return games
+        except Exception:
+            pass
+    merged: dict[str, dict] = {}
+    for i in range(days):
+        try:
+            for g in parse_games(lg, scoreboard(lg, start + timedelta(days=i), today)):
+                merged[g["id"]] = g
+        except Exception:
+            continue
+    return sorted(merged.values(), key=lambda g: (g["tip"] is None, g["tip"] or 0))
 
 
 def _rank(c: dict) -> int | None:

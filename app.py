@@ -277,7 +277,7 @@ def render_team_sport() -> None:
         with st.spinner("Loading schedule…"):
             if sport == "NFL":
                 start, days = nfl_week_window(sel_date)
-                games = espn.parse_games(lg, espn.scoreboard(lg, start, today_et, days))
+                games = espn.week_games(lg, start, days, today_et)
             else:
                 games = espn.parse_games(lg, espn.scoreboard(lg, sel_date, today_et))
     except Exception as e:
