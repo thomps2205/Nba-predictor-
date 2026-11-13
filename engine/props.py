@@ -70,7 +70,7 @@ def _market_fields(row: dict, m: str, proj: float, hist: list[float], line: floa
     row[f"L_{m}"] = line
     row[f"A5_{m}"] = float(np.mean(hist[:5])) if hist else 0.0
     row[f"V5_{m}"] = [float(x) for x in hist[:5]]
-    row[f"H_{m}"] = float(np.mean([x > line for x in hist[:10]]) * 100) if hist else 0.0
+    row[f"H_{m}"] = float(np.mean([x > line for x in hist[:10]]) * 100) if hist else float("nan")
 
 
 def build_props(lg: League, game: dict, proj: dict, profiles: dict, base: dict, b2b: set[str],
@@ -85,18 +85,22 @@ def build_props(lg: League, game: dict, proj: dict, profiles: dict, base: dict, 
         inj = espn.team_injuries(inj_all, team)
         players = []
         for a in candidates(lg, team["id"]):
+            logs = []
             raw = espn.cached_gamelog(lg, a["id"])
-            if not raw:
-                continue
-            try:
-                logs = espn.parse_gamelog(raw, lg.kind, before)
-            except Exception:
-                continue
-            if not logs:
+            if raw:
+                try:
+                    logs = espn.parse_gamelog(raw, lg.kind, before)
+                except Exception:
+                    logs = []
+            season = None
+            if lg.kind == "hockey" and len(logs) < 3:  # NHL gamelog can come back empty: use season rates
+                sraw = espn.cache_read_json(espn.athlete_stats_key(lg, a["id"]))
+                season = espn.hockey_season_rates(sraw) if sraw else None
+            if not logs and not season:
                 continue
             status = _inj_lookup(inj, a["inj_status"], a["id"], a["name"])
             cls = espn.injury_class(status)
-            players.append((a, logs, status, cls))
+            players.append((a, logs, status, cls, season))
         team_pts = proj["pts_away"] if side == "away" else proj["pts_home"]
         is_b2b = team["id"] in b2b
         common = {"Team": team["abbr"], "Opp": opp["abbr"], "TeamId": team["id"]}
@@ -118,7 +122,7 @@ def _base_row(lg: League, a: dict, status: str, cls: str, common: dict) -> dict:
 def _basketball(lg, players, tp, op, base, proj, is_b2b, q_sit, common) -> list[dict]:
     team_dates = set(tp["dates"][-10:])
     info = []
-    for a, logs, status, cls in players:
+    for a, logs, status, cls, _ in players:
         l10 = logs[:10]
         mins = [r["MIN"] for r in l10]
         avg_min = float(np.mean(mins)) if mins else 0.0
@@ -168,7 +172,7 @@ def _football(lg, players, op, base, team_pts, common) -> list[dict]:
     opp_f = max(0.8, min(1.2, (op["pa"] / base["pts"]) ** 0.5))
     game_f = max(0.85, min(1.15, (team_pts / base["pts"]) ** 0.3))
     rows = []
-    for a, logs, status, cls in players:
+    for a, logs, status, cls, _ in players:
         if cls == "OUT":
             continue
         l8 = logs[:8]
@@ -189,11 +193,13 @@ def _hockey(lg, players, op, base, is_b2b, common) -> list[dict]:
     opp_f = max(0.8, min(1.25, op["pa"] / base["pts"]))
     fat = 0.97 if is_b2b else 1.0
     rows = []
-    for a, logs, status, cls in players:
+    for a, logs, status, cls, season in players:
         if cls == "OUT":
             continue
         l10 = logs[:10]
         if len(l10) < 3:
+            if season and season["gp"] >= 3:
+                rows.append(_hockey_season_row(lg, a, status, cls, common, season, opp_f, fat))
             continue
         row = _base_row(lg, a, status, cls, common)
         toi = float(np.mean([r["TOI"] for r in l10])) if l10 else 0.0
@@ -208,6 +214,19 @@ def _hockey(lg, players, op, base, is_b2b, common) -> list[dict]:
         row["AnyGoal"] = 1 - math.exp(-g)
         rows.append(row)
     return rows
+
+
+def _hockey_season_row(lg, a, status, cls, common, season, opp_f, fat) -> dict:
+    """Projection from season per-game rates when no per-game log is available (no last-5 history)."""
+    row = _base_row(lg, a, status, cls, common)
+    row["Info"] = f"season avg · {season['gp']:.0f} GP"
+    g, ast, sog = season["G"] * opp_f * fat, season["A"] * opp_f * fat, season["SOG"] * opp_f ** 0.5 * fat
+    for m, p, avg, line in (("G", g, season["G"], 0.5), ("A", ast, season["A"], 0.5),
+                            ("SOG", sog, season["SOG"], None), ("PTS", g + ast, season["G"] + season["A"], 0.5)):
+        _market_fields(row, m, p, [], line=line)
+        row[f"A5_{m}"] = avg  # season average stands in for the last-5 average
+    row["AnyGoal"] = 1 - math.exp(-g)
+    return row
 
 
 def lost_points(lg: League, game_team: dict, inj_all: list[dict], q_sit: float, before: date) -> float:

@@ -165,6 +165,55 @@ def team_roster(lg: League, team_id: str) -> dict:
                        lambda: http_json(f"{_base(lg)}/teams/{team_id}/roster"))
 
 
+def _team_stat_map(raw: dict) -> dict[str, float]:
+    """results.stats.categories[].stats[] -> {name/abbreviation (lower-case): value}. First occurrence wins,
+    scanning general -> offensive -> defensive -> anything else (defensive FGA etc. must not shadow ours)."""
+    cats = (((raw.get("results") or {}).get("stats") or {}).get("categories")) or \
+           ((raw.get("statistics") or {}).get("splits") or {}).get("categories") or []
+    order = {"general": 0, "offensive": 1, "defensive": 2}
+    out: dict[str, float] = {}
+    for cat in sorted(cats, key=lambda c: order.get(str(c.get("name", "")).lower(), 3)):
+        for s in cat.get("stats", []) or []:
+            v = s.get("value")
+            v = num(v if v is not None else s.get("displayValue"), default=float("nan"))
+            if v != v:
+                continue
+            for k in (s.get("name"), s.get("abbreviation")):
+                if isinstance(k, str) and k.lower() not in out:
+                    out[k.lower()] = v
+    return out
+
+
+def team_possessions(raw: dict, games_from_schedule: int = 0) -> float | None:
+    """Possessions per game (Dean Oliver): FGA + 0.44*FTA - OREB + TOV, from per-game averages when ESPN
+    provides them, otherwise season totals divided by games played."""
+    s = _team_stat_map(raw)
+
+    def get(*keys):
+        for k in keys:
+            if k in s:
+                return s[k]
+        return None
+
+    avg = [get("avgfieldgoalsattempted"), get("avgfreethrowsattempted"), get("avgoffensiverebounds"),
+           get("avgturnovers", "avgtotalturnovers")]
+    if all(v is not None and v > 0 for v in avg):
+        p = avg[0] + 0.44 * avg[1] - avg[2] + avg[3]
+        if 50 < p < 120:
+            return p
+    tot = [get("fieldgoalsattempted", "fga"), get("freethrowsattempted", "fta"),
+           get("offensiverebounds", "oreb"), get("turnovers", "totalturnovers", "to", "tov")]
+    if not all(v is not None and v >= 0 for v in tot) or not tot[0]:
+        return None
+    raw_poss = tot[0] + 0.44 * tot[1] - tot[2] + tot[3]
+    gp = get("gamesplayed", "gp") or games_from_schedule
+    if gp and 50 < raw_poss / gp < 120:
+        return raw_poss / gp
+    if 50 < raw_poss < 120:  # values were already per game
+        return raw_poss
+    return None
+
+
 def schedule_key(lg: League, team_id: str) -> str:
     return f"schedule|{lg.key}|{team_id}"
 
@@ -240,6 +289,48 @@ def athlete_gamelog(lg: League, athlete_id: str) -> dict:
 
 def gamelog_cached(lg: League, athlete_id: str) -> bool:
     return cache_fresh(gamelog_key(lg, athlete_id), TTL_GAMELOG)
+
+
+def athlete_stats_key(lg: League, athlete_id: str) -> str:
+    return f"athstats|{lg.key}|{athlete_id}"
+
+
+def athlete_stats(lg: League, athlete_id: str) -> dict:
+    """Season stats (v3). Used when an NHL game log comes back empty."""
+    return disk_cached(athlete_stats_key(lg, athlete_id), TTL_ROSTER,
+                       lambda: http_json(f"{WEB}/{lg.sport}/{lg.league}/athletes/{athlete_id}/stats"))
+
+
+def hockey_season_rates(raw: dict) -> dict | None:
+    """Per-game goals / assists / shots for the latest season in a v3 athlete stats payload:
+    categories[] with names[] and statistics[] rows ({season: {year}, stats: [...]})."""
+    vals: dict[str, float] = {}
+    for cat in raw.get("categories") or []:
+        names = [str(n).lower() for n in cat.get("names") or []]
+        rows = [r for r in cat.get("statistics") or [] if isinstance(r, dict) and r.get("stats")]
+        if not names or not rows:
+            continue
+        row = max(rows, key=lambda r: num(((r.get("season") or {}).get("year")), 0))
+        for n, v in zip(names, row["stats"]):
+            vals.setdefault(n, num(v, default=float("nan")))
+    if not vals:
+        from .common import flatten_stats
+        vals = flatten_stats(raw)
+
+    def get(*keys):
+        for k in keys:
+            v = vals.get(k)
+            if v is not None and v == v:
+                return v
+        return None
+
+    gp = get("gamesplayed", "games", "gp")
+    if not gp or gp <= 0:
+        return None
+    g, a, s = get("goals", "g"), get("assists", "a"), get("shotstotal", "shots", "shotsongoal", "sog")
+    if g is None and a is None and s is None:
+        return None
+    return {"gp": gp, "G": (g or 0) / gp, "A": (a or 0) / gp, "SOG": (s or 0) / gp}
 
 
 STAT_COLS = {
@@ -337,6 +428,18 @@ def team_injuries(all_inj: list[dict], team: dict) -> list[dict]:
     return [i for i in all_inj
             if (i["team_id"] and i["team_id"] == tid) or i["team_name"].lower() == name
             or (i["team_abbr"] and i["team_abbr"].upper() == abbr)]
+
+
+def cache_read_json(key: str):
+    return cache_read(key)
+
+
+def needs_hockey_fallback(lg: League, athlete_id: str, before: date) -> bool:
+    raw = cached_gamelog(lg, athlete_id)
+    try:
+        return len(parse_gamelog(raw, "hockey", before)) < 3 if raw else True
+    except Exception:
+        return True
 
 
 def cached_gamelog(lg: League, athlete_id: str):

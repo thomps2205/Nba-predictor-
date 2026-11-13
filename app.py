@@ -217,6 +217,8 @@ def prop_card(r: dict, m: str, label: str, kind: str, b2b_ids: set[str]) -> str:
     if kind == "hockey" and m == "G" and r.get("AnyGoal") is not None:
         extra = f'<span class="pill info">Anytime goal {r["AnyGoal"] * 100:.0f}%</span>'
     b2b = '<span class="pill b2b">B2B</span>' if r["TeamId"] in b2b_ids else ""
+    hit = "—" if r[f"H_{m}"] != r[f"H_{m}"] else f'{r[f"H_{m}"]:.0f}%'
+    l5_label = "Season" if "season avg" in str(r.get("Info", "")) else "L5 avg"
     others = [mm for mm, _ in propmod.MARKETS[kind] if mm != m][:3]
     mini = "".join(
         f'<span>{esc(mm)} <b>{r[f"P_{mm}"]:{".2f" if kind == "hockey" and mm != "SOG" else ".1f"}}</b> '
@@ -229,8 +231,8 @@ def prop_card(r: dict, m: str, label: str, kind: str, b2b_ids: set[str]) -> str:
         '<div class="pgrid">'
         f'<div class="pbox hl"><span class="lbl">Proj {esc(label)}</span><div class="num">{f1.format(proj)}</div></div>'
         f'<div class="pbox"><span class="lbl">Model line</span><div class="num">{line:.1f}</div></div>'
-        f'<div class="pbox"><span class="lbl">L5 avg</span><div class="num">{r[f"A5_{m}"]:.1f}</div></div>'
-        f'<div class="pbox"><span class="lbl">L10 hit</span><div class="num">{r[f"H_{m}"]:.0f}%</div></div>'
+        f'<div class="pbox"><span class="lbl">{l5_label}</span><div class="num">{r[f"A5_{m}"]:.{2 if small else 1}f}</div></div>'
+        f'<div class="pbox"><span class="lbl">L10 hit</span><div class="num">{hit}</div></div>'
         '</div>'
         f'<div class="l5"><span class="lbl" style="margin-right:4px">Last 5</span>{chips or "—"}</div>'
         f'<div class="mini">{mini}</div></div>'
@@ -325,6 +327,9 @@ def props_fragment(games: list[dict], slate: dict, inj: list[dict]) -> None:
     cands = [a for s in ("away", "home") for a in propmod.candidates(lg, g[s]["id"])]
     prefetch([(espn.gamelog_key(lg, a["id"]), espn.TTL_GAMELOG, lambda a=a: espn.athlete_gamelog(lg, a["id"]))
               for a in cands], "Loading player game logs")
+    if lg.kind == "hockey":  # empty NHL game logs -> season stats endpoint
+        prefetch([(espn.athlete_stats_key(lg, a["id"]), espn.TTL_ROSTER, lambda a=a: espn.athlete_stats(lg, a["id"]))
+                  for a in cands if espn.needs_hockey_fallback(lg, a["id"], g["date"])], "Loading season stats")
 
     df = compute_props(lg.key, gid, float(q_sit), bucket(), g, slate["projections"][gid], slate["profiles"],
                        slate["base"], slate["b2b"], inj)

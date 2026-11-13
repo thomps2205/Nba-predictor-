@@ -51,17 +51,9 @@ def team_profile(lg: League, team_id: str, before: date) -> dict | None:
     }
     if lg.kind == "basketball":
         try:
-            s = flatten_stats(espn.team_statistics(lg, team_id))
-            fga = pick(s, "avgfieldgoalsattempted")
-            fta = pick(s, "avgfreethrowsattempted")
-            oreb = pick(s, "avgoffensiverebounds")
-            tov = pick(s, "avgturnovers", "avgtotalturnovers")
-            if all(v is not None and v > 0 for v in (fga, fta, oreb, tov)):
-                pace = fga + 0.44 * fta - oreb + tov
-                if 50 < pace < 120:
-                    prof["pace"] = pace
+            prof["pace"] = espn.team_possessions(espn.team_statistics(lg, team_id), prof["gp"])
         except Exception:
-            pass
+            prof["pace"] = None
     return prof
 
 

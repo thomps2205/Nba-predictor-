@@ -7,7 +7,10 @@ from datetime import date, timedelta
 
 from .common import (cache_fresh, disk_cached, flatten_stats, http_json, inches, ml_to_prob, num, pick, to_et,
                      to_et_date)
-from .espn import LEAGUES, SITE, WEB, scoreboard
+from .espn import LEAGUES, WEB, scoreboard
+
+CORE = "https://sports.core.api.espn.com/v2/sports/mma"
+SEGMENT_RANK = {"main card": 0, "prelims": 1, "early prelims": 2}
 
 TTL_FIGHTER = 24 * 3600
 UFC = LEAGUES["UFC"]
@@ -77,9 +80,9 @@ def _parse_event(ev: dict) -> dict | None:
                 a = f.get("athlete") or {}
                 fighters.append({
                     "id": str(a.get("id") or f.get("id") or ""),
-                    "name": a.get("displayName") or a.get("fullName") or "TBA",
+                    "name": a.get("fullName") or a.get("displayName") or "TBA",
                     "short": a.get("shortName") or a.get("displayName") or "",
-                    "record": ((f.get("records") or [{}])[0] or {}).get("summary", ""),
+                    "record": ((f.get("records") or a.get("records") or [{}])[0] or {}).get("summary", ""),
                     "headshot": (a.get("headshot") or {}).get("href", "") if isinstance(a.get("headshot"), dict) else "",
                     "flag": (a.get("flag") or {}).get("href", ""),
                     "country": (a.get("flag") or {}).get("alt", ""),
@@ -87,10 +90,7 @@ def _parse_event(ev: dict) -> dict | None:
                     "ml": _fighter_ml(c, f, len(fighters)),
                 })
             st = ((c.get("status") or {}).get("type") or {})
-            seg = (c.get("cardSegment") or {})
-            seg_name = seg.get("description") or seg.get("name") or ""
-            typ = c.get("type") or {}
-            wc = typ.get("text") or typ.get("abbreviation") or c.get("note") or ""
+            seg_name, wc = _segment_and_weight(c)
             rounds = ((c.get("format") or {}).get("regulation") or {}).get("periods")
             result = (c.get("status") or {}).get("result") or {}
             bouts.append({
@@ -105,17 +105,23 @@ def _parse_event(ev: dict) -> dict | None:
             continue
     if not bouts:
         return None
-    # Main event first: by start time (latest first), else reverse ESPN order.
-    if all(b["start"] is not None for b in bouts) and len({b["start"] for b in bouts}) > 1:
-        bouts.sort(key=lambda b: (b["start"], b["idx"]), reverse=True)
-    else:
-        bouts.reverse()
-    for i, b in enumerate(bouts):
-        if not b["segment"]:
+    # Card order: segment (Main Card > Prelims > Early Prelims), then competition id descending — ESPN gives
+    # the main event / co-main the highest ids. Start times alone are unreliable (shared block timestamps).
+    def cid(b):
+        return int(b["id"]) if str(b["id"]).isdigit() else -b["idx"]
+
+    bouts.sort(key=lambda b: (SEGMENT_RANK.get(b["segment"].lower(), 0 if not b["segment"] else 3), -cid(b)))
+    if not any(b["segment"] for b in bouts):
+        for i, b in enumerate(bouts):
             b["segment"] = "Main Card" if i < 5 else "Prelims"
+    # Main event: highest-id 5-round bout on the main card if there is one, else the top bout.
+    main = next((b for b in bouts if b["rounds"] == 5 and SEGMENT_RANK.get(b["segment"].lower(), 0) == 0), bouts[0])
+    bouts.remove(main)
+    bouts.insert(0, main)
+    for b in bouts:
         if b["rounds"] is None:
-            b["rounds"] = 5 if i == 0 else 3
-    bouts[0]["main_event"] = True
+            b["rounds"] = 5 if b is main else 3
+    main["main_event"] = True
     st = ((ev.get("status") or {}).get("type") or {})
     states = {b["state"] for b in bouts}
     venue = (((comps[0] if comps else {}).get("venue") or {}).get("fullName", "")) if comps else ""
@@ -123,6 +129,38 @@ def _parse_event(ev: dict) -> dict | None:
             "date": to_et_date(ev.get("date")), "start": to_et(ev.get("date")), "venue": venue,
             "state": "in" if "in" in states else (st.get("state") or ("post" if states == {"post"} else "pre")),
             "bouts": bouts}
+
+
+_SEG_RE = ("early prelim", "prelim", "main card")
+_WEIGHT_WORDS = ("weight", "women", "catch")
+
+
+def _segment_and_weight(c: dict) -> tuple[str, str]:
+    """Card segment and weight class from cardSegment / type.abbreviation / type.text / notes[].headline."""
+    texts = []
+    seg = c.get("cardSegment") or {}
+    texts += [seg.get("description"), seg.get("name")]
+    typ = c.get("type") or {}
+    texts += [typ.get("abbreviation"), typ.get("text"), typ.get("name")]
+    for n in c.get("notes") or []:
+        if isinstance(n, dict):
+            texts.append(n.get("headline") or n.get("text"))
+    texts.append(c.get("note"))
+    segment = weight = ""
+    for t in texts:
+        if not isinstance(t, str) or not t.strip():
+            continue
+        tl = t.lower()
+        if not segment:
+            if "early prelim" in tl:
+                segment = "Early Prelims"
+            elif "prelim" in tl:
+                segment = "Prelims"
+            elif "main card" in tl or tl == "main":
+                segment = "Main Card"
+        if not weight and any(w in tl for w in _WEIGHT_WORDS):
+            weight = t.split(" - ")[0].strip()
+    return segment, weight
 
 
 def _fighter_ml(comp: dict, f: dict, order: int):
@@ -150,8 +188,7 @@ def fighter_cached(fid: str) -> bool:
 
 def _fetch_athlete(fid: str) -> dict:
     last = None
-    for url in (f"{WEB}/mma/athletes/{fid}", f"{WEB}/mma/ufc/athletes/{fid}",
-                f"{SITE.replace('/site/v2/', '/common/v3/')}/mma/ufc/athletes/{fid}"):
+    for url in (f"{CORE}/athletes/{fid}", f"{WEB}/mma/athletes/{fid}", f"{WEB}/mma/ufc/athletes/{fid}"):
         try:
             return http_json(url, retries=1)
         except Exception as e:
@@ -160,7 +197,7 @@ def _fetch_athlete(fid: str) -> dict:
 
 
 def _fetch_stats(fid: str) -> dict:
-    for url in (f"{WEB}/mma/athletes/{fid}/stats", f"{WEB}/mma/ufc/athletes/{fid}/stats"):
+    for url in (f"{CORE}/athletes/{fid}/statistics", f"{WEB}/mma/athletes/{fid}/stats"):
         try:
             return http_json(url, retries=1)
         except Exception:
@@ -211,8 +248,8 @@ def fighter_profile(fid: str, card_fighter: dict) -> dict:
     if a:
         prof["detail_ok"] = True
         prof["age"] = num(a.get("age"), default=0) or None
-        prof["height"] = inches(a.get("height")) or inches(a.get("displayHeight"))
-        prof["reach"] = inches(a.get("reach")) or inches(a.get("displayReach"))
+        prof["height"] = inches(a.get("displayHeight")) or inches(a.get("height"))
+        prof["reach"] = inches(a.get("displayReach")) or inches(a.get("reach"))
         st = a.get("stance")
         prof["stance"] = (st.get("text") or st.get("name") or "") if isinstance(st, dict) else (st or "")
         wc = a.get("weightClass")
@@ -234,18 +271,22 @@ def fighter_profile(fid: str, card_fighter: dict) -> dict:
     if prof["reach"] is None:
         prof["reach"] = pick(s, "reach")
     stats = {
-        "slpm": pick(s, "strikelpm", "sigstrikeslandedperminute", "slpm", "strikesLandedPerMinute"),
-        "str_acc": pick(s, "strikeaccuracy", "sigstrikeaccuracy", "strikingaccuracy"),
-        "sapm": pick(s, "strikesabsorbedperminute", "sapm", "sigstrikesabsorbedperminute"),
-        "str_def": pick(s, "strikedefense", "sigstrikedefense", "strikingdefense"),
-        "td_avg": pick(s, "takedownavg", "takedownsaverage", "tdavg", "takedownsper15"),
+        "slpm": pick(s, "sigstrikeslandedpermin", "slpm", "sigstrikeslandedperminute", "strikelpm"),
+        "str_acc": pick(s, "sigstrikeaccuracy", "sigstracc", "stracc", "strikeaccuracy"),
+        "sapm": pick(s, "sigstrikesabsorbedpermin", "sapm", "sigstrikesabsorbedperminute"),
+        "str_def": pick(s, "sigstrikedefense", "strdef", "strikedefense"),
+        "td_avg": pick(s, "takedownavg", "tdavg", "takedownsaverage"),
         "td_acc": pick(s, "takedownaccuracy", "tdacc"),
         "td_def": pick(s, "takedowndefense", "tddef"),
-        "sub_avg": pick(s, "submissionavg", "submissionsaverage", "subavg"),
+        "sub_avg": pick(s, "submissionavg", "subavg", "submissionsaverage"),
     }
+    for k in ("str_acc", "str_def", "td_acc", "td_def"):  # fractions (0.52) -> percent
+        if stats[k] is not None and 0 < stats[k] <= 1.0:
+            stats[k] *= 100
     prof["stats"] = {k: v for k, v in stats.items() if v is not None}
-    ko, sub, dec = pick(s, "tkos", "kowins", "knockouts", "ko/tko"), pick(s, "submissions", "subwins"), \
-        pick(s, "decisions", "decisionwins")
+    ko = pick(s, "tkowins", "kowins", "tkos", "knockouts", "ko/tko")
+    sub = pick(s, "submissionwins", "subwins", "submissions")
+    dec = pick(s, "decisionwins", "decwins", "decisions")
     if ko is not None and sub is not None and dec is not None and (ko + sub + dec) > 0:
         prof["methods"] = (ko, sub, dec)
     return prof
