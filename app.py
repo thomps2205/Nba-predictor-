@@ -36,6 +36,7 @@ import numpy as np
 import pandas as pd
 import requests
 import streamlit as st
+from nba_api.live.nba.endpoints import boxscore as live_boxscore
 from nba_api.stats.endpoints import leaguedashteamstats, leaguegamelog
 from nba_api.stats.static import teams as nba_static_teams
 
@@ -50,6 +51,15 @@ RATE_LIMIT_SECONDS = 0.6
 
 ESPN_SCOREBOARD = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard"
 ESPN_INJURIES = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/injuries"
+CDN_SCHEDULE = "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2.json"
+
+# stats.nba.com silently drops many cloud-host requests (e.g. Streamlit Cloud), so fail fast
+# and remember the failure; the app then falls back to box scores on cdn.nba.com.
+NBA_STATS_TIMEOUT = 10
+STATS_DOWN_TTL = 30 * 60
+STATS_DOWN_FLAG = "stats_nba_down.flag"
+# NBA game-id prefixes by season type
+GAME_ID_PREFIX = {"Regular Season": "002", "Playoffs": "004", "PlayIn": "005"}
 
 BROWSER_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -74,6 +84,13 @@ NBA_HEADERS = {
     "x-nba-stats-origin": "stats",
     "x-nba-stats-token": "true",
 }
+CDN_HEADERS = {
+    "User-Agent": BROWSER_UA,
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.nba.com/",
+    "Origin": "https://www.nba.com",
+}
 
 # Cache lifetimes (seconds)
 TTL_SCOREBOARD_LIVE = 120
@@ -81,6 +98,8 @@ TTL_SCOREBOARD_PAST = 12 * 3600
 TTL_INJURIES = 15 * 60
 TTL_TEAM_STATS = 6 * 3600
 TTL_GAME_LOGS = 2 * 3600
+TTL_CDN_SCHEDULE = 30 * 60
+TTL_FINAL_BOXSCORE = 365 * 24 * 3600  # final box scores never change
 
 # Model constants
 HOME_COURT_RTG = 1.0          # pts/100 added to home ORtg and removed from away ORtg (~2 pts total)
@@ -159,8 +178,9 @@ def disk_cached(key: str, ttl: int, fetch):
 
 
 def clear_disk_cache() -> None:
-    for p in CACHE_DIR.glob("*.json"):
-        p.unlink(missing_ok=True)
+    for pattern in ("*.json", "*.flag"):
+        for p in CACHE_DIR.glob(pattern):
+            p.unlink(missing_ok=True)
 
 
 def espn_get(url: str, params: dict | None = None) -> dict:
@@ -177,16 +197,43 @@ def espn_get(url: str, params: dict | None = None) -> dict:
     raise RuntimeError(f"ESPN request failed: {url}") from last_err
 
 
+def stats_nba_down() -> bool:
+    flag = CACHE_DIR / STATS_DOWN_FLAG
+    return flag.exists() and time.time() - flag.stat().st_mtime < STATS_DOWN_TTL
+
+
 def nba_call(endpoint_cls, **kwargs) -> dict:
+    """Call a stats.nba.com endpoint. Timeouts/connection drops are not retried (they only
+    repeat the wait); after one, stats.nba.com is skipped for STATS_DOWN_TTL seconds."""
+    if stats_nba_down():
+        raise RuntimeError("stats.nba.com did not respond recently; skipping it for now")
+    last_err: Exception | None = None
+    for attempt in range(2):
+        throttle()
+        try:
+            return endpoint_cls(headers=NBA_HEADERS, timeout=NBA_STATS_TIMEOUT, **kwargs).get_dict()
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as err:
+            last_err = err
+            break
+        except Exception as err:
+            last_err = err
+            time.sleep(1.5)
+    (CACHE_DIR / STATS_DOWN_FLAG).touch()
+    raise RuntimeError(f"stats.nba.com request failed: {endpoint_cls.__name__} ({type(last_err).__name__})") from last_err
+
+
+def cdn_get(url: str) -> dict:
     last_err: Exception | None = None
     for attempt in range(3):
         throttle()
         try:
-            return endpoint_cls(headers=NBA_HEADERS, timeout=45, **kwargs).get_dict()
+            r = _session.get(url, headers=CDN_HEADERS, timeout=20)
+            r.raise_for_status()
+            return r.json()
         except Exception as err:
             last_err = err
-            time.sleep(2.0 * (attempt + 1))
-    raise RuntimeError(f"stats.nba.com request failed: {endpoint_cls.__name__}") from last_err
+            time.sleep(1.5 * (attempt + 1))
+    raise RuntimeError(f"cdn.nba.com request failed: {url}") from last_err
 
 
 def result_set_df(payload: dict, index: int = 0) -> pd.DataFrame:
@@ -236,6 +283,12 @@ def team_name_to_abbr(display_name: str) -> str | None:
 def to_minutes(v) -> float:
     if v is None or (isinstance(v, float) and np.isnan(v)):
         return 0.0
+    if isinstance(v, str) and v.startswith("PT"):  # ISO-8601 duration, e.g. PT34M12.00S
+        m = re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:([\d.]+)S)?", v)
+        if not m:
+            return 0.0
+        h, mi, se = (float(x) if x else 0.0 for x in m.groups())
+        return h * 60 + mi + se / 60
     if isinstance(v, str) and ":" in v:
         m, s = v.split(":")[:2]
         return float(m) + float(s) / 60
@@ -409,6 +462,162 @@ def load_player_logs(season: str, season_type: str) -> pd.DataFrame:
             df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
     df["KEY"] = df["PLAYER_NAME"].map(norm_name)
     return df
+
+
+# --------------------------------------------------------------------------
+# Fallback loaders: nba_api live box scores (cdn.nba.com)
+# --------------------------------------------------------------------------
+def _num(v) -> float:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _compact_boxscore(payload: dict, game_date: str) -> dict:
+    g = payload.get("game", payload)
+    teams = []
+    for side in ("homeTeam", "awayTeam"):
+        t = g[side]
+        s = t.get("statistics", {}) or {}
+        players = []
+        for p in t.get("players", []) or []:
+            ps = p.get("statistics", {}) or {}
+            if str(p.get("played", "1")) != "1" or to_minutes(ps.get("minutes")) <= 0:
+                continue
+            players.append(
+                {
+                    "id": p.get("personId"),
+                    "name": p.get("name") or f"{p.get('firstName', '')} {p.get('familyName', '')}".strip(),
+                    "min": to_minutes(ps.get("minutes")),
+                    "pts": _num(ps.get("points")),
+                    "reb": _num(ps.get("reboundsTotal")),
+                    "ast": _num(ps.get("assists")),
+                    "fg3m": _num(ps.get("threePointersMade")),
+                    "pm": _num(ps.get("plusMinusPoints")),
+                }
+            )
+        teams.append(
+            {
+                "side": side,
+                "id": t.get("teamId"),
+                "tri": t.get("teamTricode"),
+                "pts": _num(t.get("score", s.get("points"))),
+                "fga": _num(s.get("fieldGoalsAttempted")),
+                "fta": _num(s.get("freeThrowsAttempted")),
+                "oreb": _num(s.get("reboundsOffensive")),
+                "tov": _num(s.get("turnoversTotal", s.get("turnovers"))),
+                "reb": _num(s.get("reboundsTotal")),
+                "ast": _num(s.get("assists")),
+                "min": to_minutes(s.get("minutesCalculated") or s.get("minutes")) or 240.0,
+                "players": players,
+            }
+        )
+    return {"game_id": g.get("gameId"), "date": game_date, "teams": teams}
+
+
+def fetch_boxscore(game_id: str, game_date: str) -> dict:
+    def _fetch():
+        throttle()
+        payload = live_boxscore.BoxScore(game_id, headers=CDN_HEADERS, timeout=20).get_dict()
+        return _compact_boxscore(payload, game_date)
+
+    return disk_cached(f"cdn_box|{game_id}", TTL_FINAL_BOXSCORE, _fetch)
+
+
+def finished_games(season: str, season_type: str, before: date) -> list[tuple[str, str]]:
+    data = disk_cached("cdn_schedule", TTL_CDN_SCHEDULE, lambda: cdn_get(CDN_SCHEDULE))
+    ls = data.get("leagueSchedule", {})
+    if ls.get("seasonYear") and ls["seasonYear"] != season:
+        raise RuntimeError(f"cdn.nba.com only has the {ls['seasonYear']} schedule (requested {season})")
+    prefix = GAME_ID_PREFIX.get(season_type, "002")
+    out = []
+    for gd in ls.get("gameDates", []):
+        for g in gd.get("games", []):
+            gid = str(g.get("gameId", ""))
+            if not gid.startswith(prefix) or int(g.get("gameStatus", 0) or 0) != 3:
+                continue
+            raw = g.get("gameDateEst") or gd.get("gameDate", "")
+            try:
+                gdate = (datetime.strptime(raw[:10], "%Y-%m-%d") if "-" in raw[:10]
+                         else datetime.strptime(raw[:10], "%m/%d/%Y")).date()
+            except ValueError:
+                continue
+            if gdate < before:
+                out.append((gid, gdate.isoformat()))
+    return out
+
+
+@st.cache_data(ttl=3600, show_spinner=False, max_entries=8)
+def build_from_boxscores(game_keys: tuple[tuple[str, str], ...]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Team ratings (Pace/OffRtg/DefRtg/opp REB & AST) and a LeagueGameLog-style player table."""
+    team_rows, player_rows = [], []
+    for gid, gdate in game_keys:
+        path = _cache_path(f"cdn_box|{gid}")
+        if not path.exists():
+            continue
+        with path.open() as f:
+            box = json.load(f)
+        if len(box.get("teams", [])) != 2:
+            continue
+        a, b = box["teams"]
+        poss = {t["tri"]: t["fga"] + 0.44 * t["fta"] - t["oreb"] + t["tov"] for t in (a, b)}
+        game_poss = (poss[a["tri"]] + poss[b["tri"]]) / 2
+        for t, o in ((a, b), (b, a)):
+            win = t["pts"] > o["pts"]
+            team_rows.append(
+                {"ABBR": t["tri"], "TEAM_ID": t["id"], "W": int(win), "L": int(not win), "PTS": t["pts"],
+                 "OPP_PTS": o["pts"], "POSS": game_poss, "MIN": t["min"], "OPP_REB": o["reb"], "OPP_AST": o["ast"]}
+            )
+            matchup = f"{t['tri']} vs. {o['tri']}" if t["side"] == "homeTeam" else f"{t['tri']} @ {o['tri']}"
+            for p in t["players"]:
+                player_rows.append(
+                    {"PLAYER_ID": p["id"], "PLAYER_NAME": p["name"], "TEAM_ID": t["id"],
+                     "TEAM_ABBREVIATION": t["tri"], "GAME_ID": gid, "GAME_DATE": date.fromisoformat(gdate),
+                     "MATCHUP": matchup, "WL": "W" if win else "L", "MIN": p["min"], "PTS": p["pts"],
+                     "REB": p["reb"], "AST": p["ast"], "FG3M": p["fg3m"], "PLUS_MINUS": p["pm"]}
+                )
+    tg = pd.DataFrame(team_rows)
+    if tg.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    agg = tg.groupby("ABBR").agg(
+        TEAM_ID=("TEAM_ID", "first"), GP=("W", "size"), W=("W", "sum"), L=("L", "sum"), PTS=("PTS", "sum"),
+        OPP_PTS_SUM=("OPP_PTS", "sum"), POSS=("POSS", "sum"), MIN=("MIN", "sum"),
+        OPP_PTS=("OPP_PTS", "mean"), OPP_REB=("OPP_REB", "mean"), OPP_AST=("OPP_AST", "mean"),
+    )
+    agg["PACE"] = 48 * agg["POSS"] / (agg["MIN"] / 5)
+    agg["OFF_RATING"] = 100 * agg["PTS"] / agg["POSS"]
+    agg["DEF_RATING"] = 100 * agg["OPP_PTS_SUM"] / agg["POSS"]
+    agg["NET_RATING"] = agg["OFF_RATING"] - agg["DEF_RATING"]
+    agg["TEAM_NAME"] = [NBA_TEAM_BY_ABBR.get(x, {}).get("full_name", x) for x in agg.index]
+    team_stats = agg[["TEAM_ID", "TEAM_NAME", "GP", "W", "L", "PACE", "OFF_RATING", "DEF_RATING",
+                      "NET_RATING", "OPP_PTS", "OPP_REB", "OPP_AST"]]
+    logs = pd.DataFrame(player_rows)
+    logs["KEY"] = logs["PLAYER_NAME"].map(norm_name)
+    return team_stats, logs
+
+
+def load_from_boxscores(season: str, season_type: str, before: date) -> tuple[pd.DataFrame, pd.DataFrame]:
+    games = finished_games(season, season_type, before)
+    if not games:
+        raise RuntimeError(f"No finished {season} {season_type} games before {before} on cdn.nba.com")
+    missing = [g for g in games if not _cache_path(f"cdn_box|{g[0]}").exists()]
+    failures = 0
+    if missing:
+        bar = st.progress(0.0)
+        for i, (gid, gdate) in enumerate(missing, 1):
+            try:
+                fetch_boxscore(gid, gdate)
+            except Exception:
+                failures += 1
+            bar.progress(i / len(missing), text=f"Downloading NBA box scores {i}/{len(missing)} "
+                                                 "(first load only; cached afterwards)…")
+        bar.empty()
+    if failures > 0.2 * len(games):
+        raise RuntimeError(f"{failures} of {len(games)} box scores could not be downloaded from cdn.nba.com")
+    if failures:
+        st.warning(f"{failures} box score(s) could not be downloaded; ratings use the other {len(games) - failures}.")
+    return build_from_boxscores(tuple(games))
 
 
 # --------------------------------------------------------------------------
@@ -654,6 +863,9 @@ except Exception as e:
 
 # ---- Team stats + player logs ------------------------------------------
 stats_season = season
+data_source = "stats.nba.com (nba_api)"
+team_stats = logs = None
+stats_err: Exception | None = None
 try:
     with st.spinner("Loading team advanced stats and player game logs from stats.nba.com…"):
         team_stats = load_team_stats(season, season_type)
@@ -664,10 +876,27 @@ try:
             logs = load_player_logs(stats_season, season_type)
             st.info(f"No {season} {season_type} data before {game_date}; using {stats_season} stats instead.")
 except Exception as e:
-    st.error(f"Could not load stats.nba.com data and no cached copy exists: {e}")
-    st.subheader("Schedule")
-    st.dataframe(sched[["tip_et", "away", "home", "status", "mkt_details", "mkt_total"]], hide_index=True)
-    st.stop()
+    stats_err = e
+    team_stats = logs = None
+    stats_season = season
+
+if team_stats is None:
+    data_source = "NBA box scores on cdn.nba.com (nba_api live)"
+    st.info(
+        "stats.nba.com is not responding (it often blocks cloud servers), so team ratings and "
+        "player game logs are being built from official NBA box scores instead."
+    )
+    try:
+        with st.spinner("Loading NBA schedule and box scores…"):
+            team_stats, logs = load_from_boxscores(season, season_type, game_date)
+    except Exception as e:
+        st.error(f"Could not load team or player stats.\n\n- stats.nba.com: {stats_err}\n- cdn.nba.com: {e}")
+        st.subheader("Schedule")
+        st.dataframe(sched[["tip_et", "away", "home", "status", "mkt_details", "mkt_total"]], hide_index=True)
+        st.stop()
+    if team_stats.empty or logs.empty:
+        st.error("No finished games found to build ratings from.")
+        st.stop()
 
 # Use only games played before the slate date (no look-ahead when viewing past slates).
 logs = logs[logs["GAME_DATE"] < game_date]
@@ -714,7 +943,7 @@ for g in sched.itertuples():
 
 st.subheader(f"Slate — {game_date:%A, %B %d, %Y}")
 st.caption(
-    f"Team ratings: {stats_season} {season_type} · League avg pace {lg['pace']:.1f}, ORtg {lg['rtg']:.1f} · "
+    f"Team ratings: {stats_season} {season_type} via {data_source} · League avg pace {lg['pace']:.1f}, ORtg {lg['rtg']:.1f} · "
     "Spread edge > 0 means the model likes the home side vs. the market; total edge > 0 leans over."
 )
 st.dataframe(pd.DataFrame(slate_rows), hide_index=True, width="stretch")

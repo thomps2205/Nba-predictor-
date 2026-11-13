@@ -10,10 +10,17 @@ for any NBA slate. It uses only live data and no mock values.
 | Back-to-back detection | ESPN scoreboard for the previous day |
 | Team Pace / OffRtg / DefRtg, opponent REB/AST allowed | `nba_api` → `LeagueDashTeamStats` (Advanced + Opponent) |
 | Player last-10 game logs & current rosters | `nba_api` → `LeagueGameLog` (players) |
+| Fallback when stats.nba.com is unreachable | `nba_api` live box scores + season schedule on cdn.nba.com |
 
 All requests send browser-style headers, are spaced at least 0.6 s apart, retry on failure, and are cached
 as JSON in `./.cache` (schedule 2 min, injuries 15 min, game logs 2 h, team stats 6 h). If a source is down,
 the last cached copy is used and the app shows a warning.
+
+stats.nba.com often silently drops requests from cloud hosts such as Streamlit Community Cloud. The app
+waits at most 10 s, then skips stats.nba.com for 30 min. In that case it computes Pace, OffRtg, DefRtg,
+opponent REB/AST and player game logs itself from the official box scores on cdn.nba.com. The first load
+downloads every finished game, showing a progress bar for a few minutes. Those box scores are cached, so
+later loads only fetch new games.
 
 ## Run
 
