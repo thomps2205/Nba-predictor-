@@ -165,8 +165,9 @@ def matchup_card(g: dict, p: dict | None, b2b: set[str], kind: str) -> str:
     if not p:
         return body + '<div class="empty">Not enough completed games yet for a projection.</div></div>'
     hp = p["home_win_prob"] * 100
-    body += (f'<div class="winbar"><div class="a" style="width:{100 - hp:.0f}%"></div>'
-             f'<div class="h" style="width:{hp:.0f}%"></div></div>'
+    fav_cls_a, fav_cls_h = ("a", "h fav") if hp >= 50 else ("a fav", "h")
+    body += (f'<div class="winbar"><div class="{fav_cls_a}" style="width:{100 - hp:.0f}%"></div>'
+             f'<div class="{fav_cls_h}" style="width:{hp:.0f}%"></div></div>'
              f'<div class="winlbl"><span>{esc(a["abbr"])} {100 - hp:.0f}%</span><span>{esc(h["abbr"])} {hp:.0f}%</span></div>')
     o = g["odds"]
     fav = h if hp >= 50 else a
@@ -196,7 +197,7 @@ def matchup_card(g: dict, p: dict | None, b2b: set[str], kind: str) -> str:
         mkt_h = mh / (mh + ma)  # vig-free
         ml_badge = edge_badge((p["home_win_prob"] - mkt_h) * 100, 3, 7, f'{h["abbr"]} ML', f'{a["abbr"]} ML',
                               fmt="{:.0f}%")
-        ml_sub = f'Mkt {h["abbr"]} {mkt_h * 100:.0f}%'
+        ml_sub = f'Mkt {fav["abbr"]} {(mkt_h if fav is h else 1 - mkt_h) * 100:.0f}%'
     else:
         ml_badge = '<span class="badge muted">MODEL</span>'
         ml_sub = f'{p["poss"]:.0f} poss' if p.get("poss") else "Win probability"

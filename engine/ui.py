@@ -13,7 +13,9 @@ CSS = """
 --green:#22c55e;--green-bg:rgba(34,197,94,.14);--red:#f43f5e;--red-bg:rgba(244,63,94,.14);
 --amber:#f59e0b;--amber-bg:rgba(245,158,11,.15);--blue:#38bdf8;--blue-bg:rgba(56,189,248,.14)}
 .stApp{background:var(--bg)}
-.block-container{padding:1.2rem .8rem 3rem;max-width:760px}
+.block-container{padding:4.2rem .8rem 3rem;max-width:760px}
+/* keep the sport switcher reachable below Streamlit's toolbar */
+.stMainBlockContainer{padding-top:4.2rem}
 #MainMenu,footer{visibility:hidden}
 h1,h2,h3{letter-spacing:-.01em}
 .hero{display:flex;justify-content:space-between;align-items:flex-end;margin:.2rem 0 .8rem}
@@ -55,7 +57,7 @@ justify-content:center;font-size:.62rem;font-weight:800;color:var(--muted);flex:
 text-transform:uppercase}
 .tproj .num{font-weight:800;font-size:1.15rem;color:var(--green)}
 .winbar{display:flex;height:6px;border-radius:999px;overflow:hidden;background:var(--card2);margin:8px 0 4px}
-.winbar .a{background:#64748b}.winbar .h{background:var(--green)}
+.winbar .a,.winbar .h{background:#64748b}.winbar .fav{background:var(--green)}
 .winlbl{display:flex;justify-content:space-between;color:var(--muted);font-size:.7rem;margin-bottom:10px}
 .mkts{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
 .mkt{background:var(--card2);border:1px solid var(--line);border-radius:12px;padding:9px 8px;text-align:center}
