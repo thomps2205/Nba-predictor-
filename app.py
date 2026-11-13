@@ -54,6 +54,9 @@ ESPN_SCOREBOARD = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/
 ESPN_INJURIES = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/injuries"
 CDN_SCHEDULE = "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2.json"
 ESPN_SUMMARY = "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary"
+NBA_HEADSHOT = "https://cdn.nba.com/headshots/nba/latest/260x190/{id}.png"
+ESPN_HEADSHOT = "https://a.espncdn.com/combiner/i?img=/i/headshots/nba/players/full/{id}.png&w=140&h=102&scale=crop"
+RESOLVE_TTL = 30 * 60          # how long a resolved data source + its data stay in server memory
 CDN_DOWN_FLAG = "cdn_nba_down.flag"
 # ESPN season.type codes by season type
 ESPN_SEASON_TYPE = {"Regular Season": 2, "Playoffs": 3, "PlayIn": 5}
@@ -483,6 +486,7 @@ def load_player_logs(season: str, season_type: str) -> pd.DataFrame:
         if c in df:
             df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
     df["KEY"] = df["PLAYER_NAME"].map(norm_name)
+    df["HEADSHOT"] = df["PLAYER_ID"].map(lambda i: NBA_HEADSHOT.format(id=i))
     return df
 
 
@@ -842,6 +846,8 @@ def build_from_boxscores(src: str, game_keys: tuple[tuple[str, str], ...]) -> tu
                       "NET_RATING", "OPP_PTS", "OPP_REB", "OPP_AST"]]
     logs = pd.DataFrame(player_rows)
     logs["KEY"] = logs["PLAYER_NAME"].map(norm_name)
+    tmpl = ESPN_HEADSHOT if src == "espn" else NBA_HEADSHOT
+    logs["HEADSHOT"] = logs["PLAYER_ID"].map(lambda i: tmpl.format(id=i))
     return team_stats, logs
 
 
@@ -1052,6 +1058,7 @@ def project_players(
         g5 = g.head(5)
         row = {
             "Player": r["PLAYER"],
+            "Headshot": str(g["HEADSHOT"].iloc[0]) if "HEADSHOT" in g and len(g) else "",
             "Team": team,
             "Opp": opp,
             "Class": r["CLASS"],
@@ -1148,8 +1155,15 @@ letter-spacing:.02em;white-space:nowrap}
 .badge.under-lean{background:var(--red-bg);color:var(--red)}
 .badge.muted{background:transparent;color:var(--muted);border:1px solid var(--line)}
 .note{color:var(--muted);font-size:.74rem;margin:2px 2px 12px;line-height:1.45}
-.phead{display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:10px}
-.pname{font-weight:800;font-size:1rem}
+.phead{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.pname{font-weight:800;font-size:1rem;line-height:1.2}
+.pmeta{flex:1;min-width:0}
+.avatar{position:relative;width:54px;height:54px;border-radius:50%;flex:none;overflow:hidden;
+background:linear-gradient(145deg,#1f2a37,#121821);border:2px solid var(--line);display:flex;
+align-items:center;justify-content:center}
+.avatar span{color:var(--muted);font-weight:800;font-size:.85rem}
+.av-img{position:absolute;inset:0;background-size:cover;background-position:center 15%;background-repeat:no-repeat}
+div[data-testid="stButtonGroup"] button{border-radius:10px}
 .psub{color:var(--muted);font-size:.74rem;margin-top:2px}
 .pgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:10px}
 .pbox{background:var(--card2);border:1px solid var(--line);border-radius:10px;padding:7px 4px;text-align:center}
@@ -1228,6 +1242,7 @@ with st.expander("⚙️  Settings", expanded=False):
     if st.button("🔄 Refresh all data", width="stretch"):
         clear_disk_cache()
         st.cache_data.clear()
+        st.cache_resource.clear()
         st.session_state.pop("stale_notes", None)
         st.rerun()
 
@@ -1262,68 +1277,129 @@ except Exception as e:
     injury_note = f"Injury report unavailable ({e}); projections run without injury adjustments."
 
 # ---- Team ratings + player logs: stats.nba.com -> cdn.nba.com -> ESPN ----
-source_errors: dict[str, str] = {}
-team_stats = logs = None
-data_source = ""
-stats_season = season
+# The resolved data lives in server memory for RESOLVE_TTL, and the source that worked is tried first
+# next time, so widget taps never wait on a blocked source again.
+@st.cache_resource(show_spinner=False)
+def _memory() -> dict:
+    return {}
 
-try:
-    with st.spinner("Loading team ratings from stats.nba.com…"):
-        ts_ = load_team_stats(season, season_type)
-        lg_ = load_player_logs(season, season_type)
-        if ts_.empty or lg_.empty or not (lg_["GAME_DATE"] < game_date).any():
-            stats_season = prev_season(season)
-            ts_ = load_team_stats(stats_season, season_type)
-            lg_ = load_player_logs(stats_season, season_type)
-        if not ts_.empty and not lg_.empty:
-            team_stats, logs, data_source = ts_, lg_, "stats.nba.com (nba_api)"
-except Exception as e:
-    source_errors["stats.nba.com"] = str(e)
-    stats_season = season
 
-if team_stats is None:
-    for src in ("cdn", "espn"):
-        label = BOX_SOURCES[src][0]
+def _try_stats(season: str, season_type: str, game_date: date):
+    ts_ = load_team_stats(season, season_type)
+    lg_ = load_player_logs(season, season_type)
+    used = season
+    if ts_.empty or lg_.empty or not (lg_["GAME_DATE"] < game_date).any():
+        used = prev_season(season)
+        ts_ = load_team_stats(used, season_type)
+        lg_ = load_player_logs(used, season_type)
+    if ts_.empty or lg_.empty:
+        raise RuntimeError("stats.nba.com returned no data")
+    return ts_, lg_, used
+
+
+def resolve_data(season: str, season_type: str, game_date: date) -> dict:
+    mem = _memory()
+    key = (season, season_type, game_date.isoformat())
+    hit = mem.get(key)
+    if hit and time.time() - hit["t"] < (RESOLVE_TTL if hit["team_stats"] is not None else 120):
+        return hit
+
+    labels = {"stats": "stats.nba.com (nba_api)", "cdn": BOX_SOURCES["cdn"][0], "espn": BOX_SOURCES["espn"][0]}
+    order = ["stats", "cdn", "espn"]
+    preferred = mem.get(("preferred", season, season_type))
+    if preferred in order:
+        order.remove(preferred)
+        order.insert(0, preferred)
+
+    out = {"t": time.time(), "team_stats": None, "logs": None, "source": "", "stats_season": season, "errors": {}}
+    for src in order:
         try:
-            with st.spinner(f"Loading {label}…"):
-                team_stats, logs = load_from_boxscores(src, season, season_type, game_date)
-            data_source = label
+            with st.spinner(f"Loading {labels[src]}…"):
+                if src == "stats":
+                    ts_, lg_, used = _try_stats(season, season_type, game_date)
+                    out["stats_season"] = used
+                else:
+                    ts_, lg_ = load_from_boxscores(src, season, season_type, game_date)
+            lg_ = lg_[lg_["GAME_DATE"] < game_date]  # no look-ahead on past slates
+            out.update(team_stats=ts_, logs=lg_, source=labels[src])
+            mem[("preferred", season, season_type)] = src
             break
         except Exception as e:
-            source_errors[label] = str(e)
-            team_stats = logs = None
+            out["errors"][labels[src]] = str(e)
+    out["token"] = f"{key}|{out['t']}"
+    mem[key] = out
+    return out
+
+
+EMPTY_META = {"team_games": 0, "team_ppg": np.nan, "lost_pts_season": 0.0, "lost_min_season": 0.0,
+              "lost_pts_recent": 0.0, "lost_min_recent": 0.0, "lost_reb_recent": 0.0, "lost_ast_recent": 0.0}
+
+
+@st.cache_data(ttl=900, max_entries=24, show_spinner=False)
+def compute_slate(token: str, sched_sig: tuple, inj_sig: tuple, b2b: tuple, q_sit_prob: float,
+                  _sched: pd.DataFrame, _injuries: pd.DataFrame, _team_stats: pd.DataFrame,
+                  _logs: pd.DataFrame) -> dict:
+    """Everything the three tabs need, for every game and every stat, computed once.
+    Underscore args are not hashed; token/sigs identify them."""
+    b2b_set = set(b2b)
+    lg_ = league_baselines(_team_stats)
+    pools_, projections_, props_, errors_ = {}, {}, {}, {}
+
+    def pool(abbr):
+        if abbr not in pools_:
+            try:
+                pools_[abbr] = build_team_pool(_logs, abbr, _injuries, q_sit_prob)
+            except Exception:
+                pools_[abbr] = (pd.DataFrame(), dict(EMPTY_META))
+        return pools_[abbr]
+
+    for g in _sched.itertuples():
+        try:
+            if g.home not in _team_stats.index or g.away not in _team_stats.index:
+                continue
+            proj = project_game(g.home, g.away, _team_stats, lg_, b2b_set, pool(g.home)[1], pool(g.away)[1])
+            projections_[g.game_id] = proj
+        except Exception as e:
+            errors_[f"{g.away}@{g.home}"] = str(e)
+            continue
+        frames = []
+        for abbr, opp in ((g.away, g.home), (g.home, g.away)):
+            try:
+                pl, meta = pool(abbr)
+                df = project_players(_logs, pl, meta, abbr, opp, _team_stats, lg_, proj["poss"], abbr in b2b_set)
+                if not df.empty:
+                    frames.append(df)
+            except Exception as e:
+                errors_[f"{abbr} props"] = str(e)
+        props_[g.game_id] = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    return {"projections": projections_, "pools": pools_, "props": props_, "errors": errors_}
+
+
+data = resolve_data(season, season_type, game_date)
+team_stats, logs = data["team_stats"], data["logs"]
+data_source, stats_season = data["source"], data["stats_season"]
+source_errors: dict[str, str] = dict(data["errors"])
 
 projections: dict[str, dict] = {}
 pools: dict[str, tuple[pd.DataFrame, dict]] = {}
-lg: dict = {}
+all_props: dict[str, pd.DataFrame] = {}
 if team_stats is not None:
     try:
-        logs = logs[logs["GAME_DATE"] < game_date]  # no look-ahead on past slates
-        lg = league_baselines(team_stats)
+        sched_sig = tuple(sched[["game_id", "home", "away"]].itertuples(index=False, name=None))
+        inj_sig = tuple(injuries[["team", "key", "status"]].itertuples(index=False, name=None)) if not injuries.empty else ()
+        with st.spinner("Crunching projections…"):
+            slate = compute_slate(data["token"], sched_sig, inj_sig, tuple(sorted(b2b_teams)), float(q_sit_prob),
+                                  sched, injuries, team_stats, logs)
+        projections, pools, all_props = slate["projections"], slate["pools"], slate["props"]
+        source_errors.update(slate["errors"])
     except Exception as e:
         source_errors["model"] = str(e)
         team_stats = None
 
 
 def team_pool(abbr: str):
-    if abbr not in pools:
-        try:
-            pools[abbr] = build_team_pool(logs, abbr, injuries, q_sit_prob)
-        except Exception:
-            pools[abbr] = (pd.DataFrame(), {"team_games": 0, "team_ppg": np.nan, "lost_pts_season": 0.0,
-                                            "lost_min_season": 0.0, "lost_pts_recent": 0.0, "lost_min_recent": 0.0,
-                                            "lost_reb_recent": 0.0, "lost_ast_recent": 0.0})
-    return pools[abbr]
+    return pools.get(abbr, (pd.DataFrame(), dict(EMPTY_META)))
 
-
-if team_stats is not None:
-    for g in sched.itertuples():
-        try:
-            if g.home in team_stats.index and g.away in team_stats.index:
-                projections[g.game_id] = project_game(g.home, g.away, team_stats, lg, b2b_teams,
-                                                      team_pool(g.home)[1], team_pool(g.away)[1])
-        except Exception as e:
-            source_errors[f"{g.away}@{g.home}"] = str(e)
 
 tab_picks, tab_props, tab_inj = st.tabs(["🎯 Game Picks", "📊 Player Props", "🩹 Injury Report"])
 
@@ -1398,65 +1474,71 @@ with tab_picks:
 # ---- Player Props --------------------------------------------------------
 PROP_EDGE = {"PTS": (1.5, 3.0), "REB": (0.8, 1.6), "AST": (0.8, 1.6), "PRA": (2.0, 4.0)}
 
-with tab_props:
+def avatar_html(url: str, name: str) -> str:
+    initials = "".join(w[0] for w in name.split()[:2]).upper()
+    img = f'<div class="av-img" style="background-image:url(\'{esc(url)}\')"></div>' if url else ""
+    return f'<div class="avatar"><span>{esc(initials)}</span>{img}</div>'
+
+
+def prop_card(r: dict, stat: str) -> str:
+    lean, strong = PROP_EDGE[stat]
+    line = r[f"{stat} Line"]
+    chips = "".join(f'<span class="chip {"o" if v > line else "u"}">{v:.0f}</span>' for v in r[f"L5 {stat} vals"])
+    badge = edge_badge(r["_edge"], lean, strong, "▲ OVER", "▼ UNDER", neg_is_red=True)
+    pill = status_pill(r["Class"], r["Status"])
+    b2b = '<span class="pill b2b">B2B</span>' if r["Team"] in b2b_teams else ""
+    return (
+        f'<div class="card"><div class="phead">{avatar_html(r.get("Headshot", ""), r["Player"])}'
+        f'<div class="pmeta"><div class="pname">{esc(r["Player"])}</div>'
+        f'<div class="psub">{esc(r["Team"])} vs {esc(r["Opp"])} · {r["Proj MIN"]:.0f} min proj {pill} {b2b}</div>'
+        f'</div>{badge}</div>'
+        '<div class="pgrid">'
+        f'<div class="pbox hl"><span class="lbl">Proj {stat}</span><div class="num">{r[f"Proj {stat}"]:.1f}</div></div>'
+        f'<div class="pbox"><span class="lbl">Model line</span><div class="num">{line:.1f}</div></div>'
+        f'<div class="pbox"><span class="lbl">L5 avg</span><div class="num">{r[f"L5 {stat}"]:.1f}</div></div>'
+        f'<div class="pbox"><span class="lbl">L10 hit</span><div class="num">{r[f"{stat} L10 Over%"]:.0f}%</div></div>'
+        '</div>'
+        f'<div class="l5"><span class="lbl" style="margin-right:4px">Last 5</span>{chips}</div>'
+        '<div class="mini">'
+        f'<span>PTS <b>{r["Proj PTS"]:.1f}</b> <small>(L5 {r["L5 PTS"]:.1f})</small></span>'
+        f'<span>REB <b>{r["Proj REB"]:.1f}</b> <small>(L5 {r["L5 REB"]:.1f})</small></span>'
+        f'<span>AST <b>{r["Proj AST"]:.1f}</b> <small>(L5 {r["L5 AST"]:.1f})</small></span>'
+        '</div></div>'
+    )
+
+
+@st.fragment
+def render_props() -> None:
+    """Runs as a fragment: changing game / market / team only re-renders this block from cached projections."""
     games = [g for g in sched.itertuples() if g.game_id in projections]
     if not games:
         H('<div class="card"><b>Player props need team ratings and game logs, which are unavailable right now.</b>'
           '<div class="note">Tap Refresh in Settings to retry.</div></div>')
-    else:
-        labels = {g.game_id: f"{g.away} @ {g.home}" + (f"  ·  {g.tip_et:%-I:%M %p}" if pd.notna(g.tip_et) else "")
-                  for g in games}
-        gid = st.selectbox("Game", list(labels), format_func=labels.get, label_visibility="collapsed")
-        g = next(x for x in games if x.game_id == gid)
-        stat = st.radio("Market", ["PTS", "REB", "AST", "PRA"], horizontal=True, label_visibility="collapsed")
-        side = st.radio("Team", ["Both", g.away, g.home], horizontal=True, label_visibility="collapsed")
-        H('<div class="note">Edge = projection vs. last-5 average (free data sources publish no sportsbook '
-          'prop lines). Chips show the last 5 games, green when above the model line. '
-          'Hit = share of last 10 games over the model line.</div>')
+        return
+    labels = {g.game_id: f"{g.away} @ {g.home}" + (f"  ·  {g.tip_et:%-I:%M %p}" if pd.notna(g.tip_et) else "")
+              for g in games}
+    gid = st.selectbox("Game", list(labels), format_func=labels.get, label_visibility="collapsed")
+    g = next(x for x in games if x.game_id == gid)
+    stat = st.segmented_control("Market", ["PTS", "REB", "AST", "PRA"], default="PTS",
+                                label_visibility="collapsed", width="stretch") or "PTS"
+    side = st.segmented_control("Team", ["Both", g.away, g.home], default="Both",
+                                label_visibility="collapsed", width="stretch") or "Both"
+    H('<div class="note">Edge = projection vs. last-5 average (free data sources publish no sportsbook '
+      'prop lines). Chips show the last 5 games, green when above the model line. '
+      'Hit = share of last 10 games over the model line.</div>')
+    props = all_props.get(gid, pd.DataFrame())
+    if not props.empty and side != "Both":
+        props = props[props["Team"] == side]
+    if props.empty:
+        H('<div class="card"><div class="empty">No rotation players with recent game logs.</div></div>')
+        return
+    props = props.assign(_edge=props[f"Proj {stat}"] - props[f"L5 {stat}"])
+    props = props.reindex(props["_edge"].abs().sort_values(ascending=False).index)
+    H("".join(prop_card(r, stat) for r in props.to_dict("records")))
 
-        frames = []
-        for abbr, opp in ((g.away, g.home), (g.home, g.away)):
-            if side not in ("Both", abbr):
-                continue
-            try:
-                pool, meta = team_pool(abbr)
-                df = project_players(logs, pool, meta, abbr, opp, team_stats, lg, projections[gid]["poss"],
-                                     abbr in b2b_teams)
-                if not df.empty:
-                    frames.append(df)
-            except Exception as e:
-                H(f'<div class="card"><div class="empty">Could not project {esc(abbr)} players: {esc(str(e))}</div></div>')
-        props = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-        if props.empty:
-            H('<div class="card"><div class="empty">No rotation players with recent game logs.</div></div>')
-        else:
-            props["_edge"] = props[f"Proj {stat}"] - props[f"L5 {stat}"]
-            props = props.reindex(props["_edge"].abs().sort_values(ascending=False).index)
-            lean, strong = PROP_EDGE[stat]
-            for r in props.to_dict("records"):
-                line = r[f"{stat} Line"]
-                chips = "".join(f'<span class="chip {"o" if v > line else "u"}">{v:.0f}</span>'
-                                for v in r[f"L5 {stat} vals"])
-                badge = edge_badge(r["_edge"], lean, strong, "▲ OVER", "▼ UNDER", neg_is_red=True)
-                pill = status_pill(r["Class"], r["Status"])
-                b2b = '<span class="pill b2b">B2B</span>' if r["Team"] in b2b_teams else ""
-                H(
-                    f'<div class="card"><div class="phead"><div><div class="pname">{esc(r["Player"])}</div>'
-                    f'<div class="psub">{esc(r["Team"])} vs {esc(r["Opp"])} · {r["Proj MIN"]:.0f} min proj '
-                    f'{pill} {b2b}</div></div>{badge}</div>'
-                    '<div class="pgrid">'
-                    f'<div class="pbox hl"><span class="lbl">Proj {stat}</span><div class="num">{r[f"Proj {stat}"]:.1f}</div></div>'
-                    f'<div class="pbox"><span class="lbl">Model line</span><div class="num">{line:.1f}</div></div>'
-                    f'<div class="pbox"><span class="lbl">L5 avg</span><div class="num">{r[f"L5 {stat}"]:.1f}</div></div>'
-                    f'<div class="pbox"><span class="lbl">L10 hit</span><div class="num">{r[f"{stat} L10 Over%"]:.0f}%</div></div>'
-                    '</div>'
-                    f'<div class="l5"><span class="lbl" style="margin-right:4px">Last 5</span>{chips}</div>'
-                    '<div class="mini">'
-                    f'<span>PTS <b>{r["Proj PTS"]:.1f}</b> <small>(L5 {r["L5 PTS"]:.1f})</small></span>'
-                    f'<span>REB <b>{r["Proj REB"]:.1f}</b> <small>(L5 {r["L5 REB"]:.1f})</small></span>'
-                    f'<span>AST <b>{r["Proj AST"]:.1f}</b> <small>(L5 {r["L5 AST"]:.1f})</small></span>'
-                    '</div></div>'
-                )
+
+with tab_props:
+    render_props()
 
 # ---- Injury Report -------------------------------------------------------
 CLASS_ORDER = {"OUT": 0, "Q": 1, "ACTIVE": 2}
