@@ -1,1 +1,41 @@
-# Nba-predictor-
+# NBA Game & Player Prop Predictor
+
+A Streamlit app that projects spreads, totals, win probabilities and player PTS / REB / AST / PRA lines
+for any NBA slate. It uses only live data and no mock values.
+
+| Data | Source |
+|---|---|
+| Daily schedule, live status/scores, market spread & total | ESPN public scoreboard JSON |
+| Injury report | ESPN public injuries JSON |
+| Back-to-back detection | ESPN scoreboard for the previous day |
+| Team Pace / OffRtg / DefRtg, opponent REB/AST allowed | `nba_api` → `LeagueDashTeamStats` (Advanced + Opponent) |
+| Player last-10 game logs & current rosters | `nba_api` → `LeagueGameLog` (players) |
+
+All requests send browser-style headers, are spaced at least 0.6 s apart, retry on failure, and are cached
+as JSON in `./.cache` (schedule 2 min, injuries 15 min, game logs 2 h, team stats 6 h). If a source is down,
+the last cached copy is used and the app shows a warning.
+
+## Run
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+Use the sidebar to pick the slate date, season, season type, and how likely Questionable / Day-to-Day
+players are to sit. **Refresh all data** clears the cache. When you view a past date, only game logs from
+before that date are used.
+
+## Model (summary)
+
+* **Possessions** = Pace_home × Pace_away / league pace, minus 0.5 per team on a back-to-back.
+* **Matchup ORtg** = OffRtg × opponent DefRtg / league rating, ±1.0 per 100 possessions for home court.
+* **Injuries**: each missing player's scoring and minutes, weighted by how often they actually played,
+  lower the team's OffRtg and raise its DefRtg.
+* **Back-to-backs**: −1.2 OffRtg, +1.0 DefRtg, and fewer minutes / slightly lower efficiency for players.
+* **Player props**: recency-weighted last-10 per-minute rates × projected minutes. Absent teammates' minutes
+  are redistributed, and each player is adjusted for game pace, opponent DefRtg (PTS), opponent
+  rebounds / assists allowed per possession (REB / AST), and a usage bump. Lines are rounded to the
+  nearest .5 and come with the player's last-10 hit rate.
+
+Projections are estimates for entertainment and research, not betting advice.
