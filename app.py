@@ -732,7 +732,8 @@ def leg_html(l: parlays.Leg, show_edge: bool = False) -> str:
 
 def parlay_card(pl: dict) -> str:
     ev = pl["ev"] * 100
-    tag_cls = {"SAFE": "strong", "VALUE": "lean", "LONGSHOT": "muted", "MIXED": "strong"}.get(pl["tag"], "lean")
+    tag_cls = {"SAFE": "strong", "VALUE": "lean", "LONGSHOT": "muted", "MIXED": "strong",
+               "PROPS": "strong"}.get(pl["tag"], "lean")
     sports = sorted({l.sport for l in pl["legs"]})
     return (f'<div class="card"><div class="ghead"><div class="pl-title">{esc(pl["title"])}'
             f'<div class="psub">{len(pl["legs"])} legs · {esc(" + ".join(sports))}</div></div>'
@@ -762,17 +763,21 @@ def render_parlays(legs: list[parlays.Leg], mixed: bool = False) -> None:
       + '<div class="card">' + "".join(leg_html(l, show_edge=True) for l in pool[:10]) + "</div>")
 
 
-def gather_prop_legs(sk: str, games: list[dict], slate: dict, inj: list[dict], load_all: bool) -> list:
+def gather_prop_legs(sk: str, games: list[dict], slate: dict, inj: list[dict], load_all: bool,
+                     auto_games: int = 4) -> list:
+    """Prop legs from the soonest `auto_games` upcoming games (player logs loaded behind a progress bar),
+    every game already loaded, or every game when load_all is on."""
     lg_ = LEAGUES[sk]
-    book = cached_lines(sk, bucket(5))
-    if not book:
-        return []
+    try:
+        book = cached_lines(sk, bucket(5))
+    except Exception:
+        book = {}
     labels = dict(propmod.MARKETS[lg_.kind])
     legs = []
-    for g in games:
-        if g["id"] not in slate["projections"] or g["state"] != "pre":
-            continue
-        if load_all:
+    upcoming = sorted((g for g in games if g["id"] in slate["projections"] and g["state"] == "pre"),
+                      key=lambda g: (g["tip"] is None, g["tip"] or 0))
+    for i, g in enumerate(upcoming):
+        if load_all or i < auto_games:
             prefetch_players(lg_, g)
         elif not all(cache_fresh(f"roster|{sk}|{g[s]['id']}", espn.TTL_ROSTER) for s in ("away", "home")):
             continue  # props for this game haven't been loaded yet
@@ -787,19 +792,20 @@ def gather_prop_legs(sk: str, games: list[dict], slate: dict, inj: list[dict], l
 
 @st.fragment
 def parlay_fragment(games: list[dict], slate: dict, inj: list[dict]) -> None:
-    load_all = st.toggle("Include player props from every game (loads all player logs the first time)",
+    load_all = st.toggle("Scan player props in every game (default: the next 4 games; slower the first time)",
                          key=f"pl_props_{sport}")
     legs = parlays.game_legs(sport, lg.kind, games, slate["projections"])
     legs += gather_prop_legs(sport, games, slate, inj, load_all)
-    note("Each leg's hit chance blends the model (60%) with the market (40%); prices are ESPN moneylines, -110 for spreads/totals and "
-         "-115 for PrizePicks / Underdog prop lines. Legs are treated as independent (one per game), so real "
-         "parlay odds may differ. Not betting advice.")
+    note("Each leg's hit chance blends the model (60%) with the market (40%). Prices: ESPN moneylines, -110 "
+         "spreads/totals, -115 props. Props use the PrizePicks / Underdog line when posted, otherwise the player's "
+         "last-10 average as the line. One leg per game; real parlay odds may differ. Not betting advice.")
     render_parlays(legs)
 
 
 def render_mixed() -> None:
     hero(f"{today_et:%a, %b %d}<br>All sports")
-    load_all = st.toggle("Include player props from every game (slow the first time)", key="mix_props")
+    load_all = st.toggle("Scan player props in every game (default: next 2 games per sport; slower first time)",
+                         key="mix_props")
     legs, coverage = [], []
     for sk in ("NBA", "NCAAB", "NFL", "NHL"):
         try:
@@ -815,7 +821,7 @@ def render_mixed() -> None:
                 continue
             slate, inj = load_team_data(sk, games)
             sl = parlays.game_legs(sk, LEAGUES[sk].kind, games, slate["projections"])
-            sl += gather_prop_legs(sk, games, slate, inj, load_all)
+            sl += gather_prop_legs(sk, games, slate, inj, load_all, auto_games=2)
             legs += sl
             coverage.append(f"{sk}: {len(games)} game{'s' if len(games) != 1 else ''} · {len(sl)} legs")
         except Exception as e:
@@ -836,7 +842,8 @@ def render_mixed() -> None:
       + "".join(f'<div class="factor" style="align-items:center"><span style="display:flex;align-items:center;'
                 f'gap:10px">{league_logo_html(c.split(":")[0], 28)}<b>{esc(c.split(":")[0])}</b></span>'
                 f'<span class="v">{esc(c.split(":", 1)[1].strip())}</span></div>' for c in coverage) + "</div>")
-    note("Mixed parlays combine the best value legs across sports (one leg per game, legs from 2+ sports). "
+    note("Mixed parlays combine the best value game lines and player props across sports (one leg per game, "
+         "legs from 2+ sports; props use the posted PrizePicks / Underdog line or the player's last-10 average). "
          "Hit chances blend each sport's model (60%) with the market (40%); prices are ESPN moneylines, -110 spreads/totals and -115 "
          "pick'em props. Not betting advice.")
     render_parlays(legs, mixed=True)

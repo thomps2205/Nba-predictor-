@@ -138,8 +138,27 @@ def game_legs(sport: str, kind: str, games: list[dict], projections: dict) -> li
     return legs
 
 
+COUNT_LINE = {("hockey", "G"): 0.5, ("hockey", "A"): 0.5, ("hockey", "PTS"): 0.5}
+MIN_AVG_LEG = {"PASS": 120, "RUSH": 25, "REC": 25, "RECS": 2.0, "SOG": 1.5, "PTS": 5.0, "REB": 2.5, "AST": 1.5,
+               "PRA": 10.0}
+
+
+def _proxy_line(kind: str, m: str, hist: list[float]) -> float | None:
+    """Stand-in line when no book line is posted: the player's last-10 average rounded to a .5 (books set
+    their lines near recent form). Needs 5+ games and a meaningful role in the market."""
+    if len(hist) < 5:
+        return None
+    if (kind, m) in COUNT_LINE:
+        return COUNT_LINE[(kind, m)]
+    avg = float(np.mean(hist))
+    if avg < MIN_AVG_LEG.get(m, 0) and not (kind == "hockey" and m == "SOG"):
+        return None
+    return round(avg - 0.5) + 0.5
+
+
 def prop_legs(sport: str, kind: str, game: dict, df, book: dict, norm_name, labels: dict) -> list[Leg]:
-    """Prop legs only where a PrizePicks / Underdog line is posted (the model line is not a market)."""
+    """Player-prop legs. Uses the PrizePicks / Underdog line when posted; otherwise the player's last-10 average
+    as a stand-in line (so props still mix into parlays when the pick'em boards block cloud servers)."""
     legs: list[Leg] = []
     if df is None or getattr(df, "empty", True) or game["state"] != "pre":
         return legs
@@ -149,10 +168,17 @@ def prop_legs(sport: str, kind: str, game: dict, df, book: dict, norm_name, labe
     for r in df.to_dict("records"):
         team = by_abbr.get(r.get("Team"), {})
         for m in labels:
-            b = book.get((norm_name(r["Player"]), m))
-            if not b or f"P_{m}" not in r:
+            if f"P_{m}" not in r:
                 continue
-            line, src = b
+            b = book.get((norm_name(r["Player"]), m))
+            if b:
+                line, src = b
+                src_txt = f"{src} line"
+            else:
+                line = _proxy_line(kind, m, r.get(f"V10_{m}") or [])
+                if line is None:
+                    continue
+                src_txt = "L10-avg line"
             proj = r[f"P_{m}"]
             if (kind, m) in COUNT_MARKETS:
                 p_over = 1 - _poisson_cdf(int(math.floor(line)), max(proj, 0.01))
@@ -161,8 +187,10 @@ def prop_legs(sport: str, kind: str, game: dict, df, book: dict, norm_name, labe
                 sd = max(float(np.std(hist)) if len(hist) >= 4 else 0.0, PROP_SD_FLOOR.get(m, 0.25 * proj), 0.2 * proj)
                 p_over = 1 - norm_cdf((line - proj) / sd)
             side, prob = ("Over", p_over) if p_over >= 0.5 else ("Under", 1 - p_over)
+            if side == "Under" and (kind, m) in COUNT_LINE:
+                continue  # "under 0.5 goals" is a heavy favorite at real books, never a -115 pick
             legs.append(Leg(sport, game["id"], matchup, f'{r["Player"]} {side} {line:g} {labels[m]}', "Prop", prob,
-                            PROP_DEC, when, note=f"{src} line · model {proj:.1f}", mkt=0.5,
+                            PROP_DEC, when, note=f"{src_txt} · model {proj:.1f}", mkt=0.5,
                             logo=team.get("logo", ""), fallback=r.get("Team", "")))
     return legs
 
@@ -195,11 +223,15 @@ def value_legs(legs: list[Leg]) -> list[Leg]:
     return good
 
 
-def _combos(pool: list[Leg], n: int, mixed: bool, all_sports: bool = False) -> list[dict]:
+def _combos(pool: list[Leg], n: int, mixed: bool, all_sports: bool = False, props_mix: bool = False) -> list[dict]:
     out = []
     for c in itertools.combinations(pool, n):
         if len({(l.sport, l.game_id) for l in c}) < n:  # one leg per game: legs stay independent
             continue
+        if props_mix:  # at least one player prop AND at least one game line
+            k = sum(l.market == "Prop" for l in c)
+            if k == 0 or k == n:
+                continue
         n_sports = len({l.sport for l in c})
         if (mixed and n_sports < 2) or (all_sports and n_sports < n):
             continue
@@ -213,10 +245,17 @@ def build(legs: list[Leg], sizes=(2, 3, 4), mixed: bool = False) -> list[dict]:
     """Best parlays, chosen in order (safest 2-leg by hit probability; for mixed, a 3-leg with every leg from a
     different sport; best-value 3-leg and longshot 4-leg by EV). No game is reused across parlays, so the same
     spread / total / pick never appears on two cards."""
-    pool = value_legs(legs)[:MAX_POOL * (2 if mixed else 1)]
+    ranked = value_legs(legs)
+    cap = MAX_POOL * (2 if mixed else 1)
+    pool = ranked[:cap]
+    extra = [l for l in ranked[cap:] if l.market == "Prop"][:6]  # make sure props get a seat in the search
+    if not any(l.market == "Prop" for l in pool):
+        pool += extra
     used: set[tuple[str, str]] = set()
     pre = "Mixed " if mixed else ""
     plan = [(2, f"{pre}safest 2-leg".capitalize(), "SAFE", "prob", False)]
+    if any(l.market == "Prop" for l in pool) and any(l.market != "Prop" for l in pool):
+        plan.append((3, "Props + game lines", "PROPS", "ev", "props"))
     if mixed:
         plan.append((3, "One leg per sport (3 sports)", "MIXED", "ev", True))
     plan += [(3, f"{pre}best value 3-leg".capitalize(), "VALUE", "ev", False),
@@ -226,7 +265,7 @@ def build(legs: list[Leg], sizes=(2, 3, 4), mixed: bool = False) -> list[dict]:
         if n not in sizes:
             continue
         avail = [l for l in pool if (l.sport, l.game_id) not in used]
-        combos = _combos(avail, n, mixed, all_sports)
+        combos = _combos(avail, n, mixed, all_sports is True, props_mix=all_sports == "props")
         if not combos:
             continue
         if key == "prob":

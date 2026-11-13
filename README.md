@@ -72,10 +72,10 @@ streamlit run app.py
 * **Parlays** appear as a tab in every sport, plus a **MIX** view in the sport switcher that combines today's
   legs from all five sports.
   * Each leg's hit chance blends the model (60%) with the market's no-vig probability (40%). Spreads, totals
-    and moneylines come from ESPN's lines. Props are included only where PrizePicks / Underdog posts a line.
+    and moneylines come from ESPN's lines. Props use the PrizePicks / Underdog line when one is posted, otherwise the player's last-10 average rounded to a .5 as a stand-in line. Props load automatically for the next 4 games per sport (2 per sport in MIX), or every game with the toggle.
     UFC legs need an ESPN moneyline.
   * Parlays use at most one leg per game, and no game appears on more than one card. The cards are: safest 2-leg, best-value
-    3-leg and longshot 4-leg (MIX adds a 3-leg with every leg from a different sport).
+    3-leg, longshot 4-leg and a Props + game lines 3-leg (MIX adds a 3-leg with every leg from a different sport).
   * Each card shows hit chance, estimated odds (ESPN moneylines, -110 spreads/totals, -115 pick'em props), fair
     odds and expected value.
 * **Injuries** (NBA, NFL, NHL) shows ESPN's report for every team on the slate.
