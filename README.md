@@ -19,7 +19,8 @@ ESPN's public JSON is the primary source for every sport:
 | UFC fight cards | `…/mma/ufc/scoreboard` |
 | UFC bio and record (age, height, reach, stance) | `sports.core.api.espn.com/v2/sports/mma/athletes/{id}` |
 | UFC career stats (SLpM, SApM, accuracy, defense, TD avg/acc/def, sub avg) | `sports.core.api.espn.com/v2/sports/mma/athletes/{id}/statistics` |
-| UFC fight history (method, round, time, opponent; drives method splits and recent form) | `site.web.api.espn.com/apis/common/v3/sports/mma/athletes/{id}/fighthistory`, then `…/gamelog`, then `site.api.espn.com/apis/site/v2/sports/mma/athletes/{id}/gamelog` |
+| UFC fight history (method, round, time, opponent; drives finish rounds and recent form) | `sports.core.api.espn.com/v2/sports/mma/athletes/{id}/eventlog` (or `…/leagues/ufc/athletes/{id}/eventlog`). The newest 5 bouts are resolved through `site.web.api.espn.com/apis/common/v3/sports/mma/ufc/fightcenter/{event_id}`, cached 30 days and shared by everyone on that card, or else the core competition `$ref`. Fallbacks: `common/v3 …/fighthistory`, `…/gamelog`, `site.api …/athletes/{id}/gamelog` |
+| UFC career method and loss totals (tkos, submissions, decisions, lossesByKo, lossesBySubmission) | `sports.core.api.espn.com/v2/sports/mma/athletes/{id}/records` |
 
 Two outside sources add information ESPN doesn't have:
 

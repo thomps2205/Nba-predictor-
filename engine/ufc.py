@@ -281,7 +281,7 @@ def div_avg(weight_class: str) -> dict:
 
 
 def fighter_keys(fid: str) -> list[str]:
-    return [f"fighter|{fid}", f"fighterstats|{fid}", f"fighterhist|{fid}"]
+    return [f"fighter|{fid}", f"fighterstats|{fid}", f"fighterhist2|{fid}", f"fighterrec|{fid}"]
 
 
 def fighter_cached(fid: str) -> bool:
@@ -309,8 +309,200 @@ def _fetch_stats(fid: str) -> dict:
     return {}
 
 
+TTL_PAST_EVENT = 30 * 24 * 3600   # finished events never change
+EVENTLOG_BOUTS = 5                 # past bouts resolved per fighter (career totals come from /records)
+
+
+def _https(u: str) -> str:
+    return u.replace("http://", "https://", 1) if u.startswith("http://") else u
+
+
+def _ref(obj) -> str:
+    return _https(obj.get("$ref", "")) if isinstance(obj, dict) else (_https(obj) if isinstance(obj, str) else "")
+
+
+def _ids_from(ref: str) -> tuple[str, str]:
+    e = re.search(r"/events/(\d+)", ref or "")
+    c = re.search(r"/competitions/(\d+)", ref or "")
+    return (e.group(1) if e else ""), (c.group(1) if c else "")
+
+
+def _find_comp(obj, fid: str, cid: str = ""):
+    """The competition dict (anywhere in an event payload) whose competitors include fighter fid."""
+    if isinstance(obj, dict):
+        cs = obj.get("competitors")
+        if isinstance(cs, list) and cs:
+            ids = {str(c.get("id") or (c.get("athlete") or {}).get("id") or "") for c in cs if isinstance(c, dict)}
+            refs = " ".join(_ref(c.get("athlete")) for c in cs if isinstance(c, dict))
+            if fid in ids or f"/athletes/{fid}" in refs or (cid and str(obj.get("id")) == cid):
+                return obj
+        for v in obj.values():
+            r = _find_comp(v, fid, cid)
+            if r is not None:
+                return r
+    elif isinstance(obj, list):
+        for v in obj:
+            r = _find_comp(v, fid, cid)
+            if r is not None:
+                return r
+    return None
+
+
+def _athlete_name(c: dict) -> str:
+    a = c.get("athlete") or {}
+    name = a.get("displayName") or a.get("fullName") or c.get("displayName") or ""
+    if name or not _ref(a):
+        return name
+    oid = _ref(a).rstrip("/").split("/")[-1].split("?")[0]
+    try:
+        d = disk_cached(f"fighter|{oid}", TTL_FIGHTER, lambda: http_json(_ref(a), retries=1))
+        d = d.get("athlete", d)
+        return d.get("displayName") or d.get("fullName") or ""
+    except Exception:
+        return ""
+
+
+def _bout_from_comp(comp: dict, fid: str, event_name: str, event_date: str, ufc: bool) -> dict | None:
+    cs = [c for c in comp.get("competitors") or [] if isinstance(c, dict)]
+    if len(cs) != 2:
+        return None
+
+    def is_me(c):
+        return str(c.get("id") or (c.get("athlete") or {}).get("id") or "") == fid or \
+            _ref(c.get("athlete")).rstrip("/").split("/")[-1].split("?")[0] == fid
+
+    me = next((c for c in cs if is_me(c)), None)
+    if me is None:
+        return None
+    opp = cs[1] if me is cs[0] else cs[0]
+    st = comp.get("status") or {}
+    if isinstance(st, dict) and "$ref" in st and len(st) == 1:
+        try:
+            st = http_json(_ref(st), retries=1)
+        except Exception:
+            st = {}
+    typ = st.get("type") or {}
+    if typ.get("completed") is False or typ.get("state") in ("pre", "in"):
+        return None
+    if me.get("winner") is True:
+        res = "W"
+    elif opp.get("winner") is True:
+        res = "L"
+    else:
+        res = "D" if typ.get("completed") or typ.get("state") == "post" else ""
+    if not res:
+        return None
+    result = st.get("result") or {}
+    method_raw = (_txt(result.get("description")) or _txt(result.get("displayName")) or _txt(result.get("name"))
+                  or _txt(typ.get("detail")) or _txt(typ.get("shortDetail")) or _txt(typ.get("description")))
+    when = str(comp.get("date") or comp.get("startDate") or event_date or "")
+    d = to_et_date(when) if when else None
+    return {"result": res, "method": _method_label(method_raw), "code": _method_code(method_raw),
+            "detail": method_raw, "round": int(num(st.get("period"), 0)),
+            "time": str(st.get("displayClock") or st.get("clock") or ""), "opponent": _athlete_name(opp),
+            "event": event_name, "date": f"{d:%b %d, %Y}" if d else "", "_d": d.isoformat() if d else "", "ufc": ufc}
+
+
+def _event_payload(eid: str, ev_ref: str) -> dict:
+    """Whole past event: common/v3 fightcenter (names inline), else the core event ref. Cached 30 days and
+    shared by every fighter who was on that card."""
+    def fetch():
+        for url in (f"{WEB}/mma/ufc/fightcenter/{eid}", ev_ref):
+            if not url:
+                continue
+            try:
+                d = http_json(url, retries=1)
+                if d:
+                    return d
+            except Exception:
+                continue
+        return {}
+    return disk_cached(f"mmaevent|{eid}", TTL_PAST_EVENT, fetch)
+
+
+def _resolve_item(it: dict, fid: str) -> dict | None:
+    ev_ref, comp_ref = _ref(it.get("event")), _ref(it.get("competition"))
+    eid, cid = _ids_from(ev_ref or comp_ref)
+    if not cid:
+        cid = _ids_from(comp_ref)[1]
+    ufc = "/leagues/ufc/" in (ev_ref + comp_ref) or "ufc" in _txt(it.get("league")).lower()
+    comp, ev_name, ev_date = None, "", ""
+    if eid:
+        try:
+            ev = _event_payload(eid, ev_ref)
+        except Exception:
+            ev = {}
+        evo = ev.get("event") or ev.get("header") or ev
+        ev_name = _txt(evo.get("name") or evo.get("shortName")) if isinstance(evo, dict) else ""
+        ev_date = str(evo.get("date") or "") if isinstance(evo, dict) else ""
+        comp = _find_comp(ev, fid, cid)
+    if comp is None and comp_ref:
+        try:
+            comp = disk_cached(f"mmacomp|{eid}|{cid}", TTL_PAST_EVENT, lambda: http_json(comp_ref, retries=1))
+        except Exception:
+            comp = None
+    if not isinstance(comp, dict):
+        return None
+    ufc = ufc or "ufc" in ev_name.lower()
+    return _bout_from_comp(comp, fid, ev_name, ev_date, ufc)
+
+
+def _eventlog_history(fid: str) -> dict:
+    """Core eventlog -> newest past bouts, each resolved from its event (fightcenter / core competition)."""
+    raw, items = None, []
+    for url in (f"{CORE}/athletes/{fid}/eventlog", f"{CORE}/leagues/ufc/athletes/{fid}/eventlog"):
+        try:
+            raw = http_json(url, retries=1)
+        except Exception:
+            continue
+        evs = raw.get("events") or {}
+        items = evs.get("items") if isinstance(evs, dict) else (evs if isinstance(evs, list) else [])
+        pages = int(num((evs if isinstance(evs, dict) else {}).get("pageCount") or raw.get("pageCount"), 1))
+        if pages > 1:  # newest bouts may sit on the last page
+            try:
+                last = http_json(url, {"page": pages}, retries=1)
+                le = last.get("events") or {}
+                items = (items or []) + list((le.get("items") if isinstance(le, dict) else le) or [])
+            except Exception:
+                pass
+        if items:
+            break
+    if not items:
+        return {}
+    full = []
+    for it in items:
+        if isinstance(it, dict) and "$ref" in it and len(it) == 1:
+            it = {"event": {"$ref": it["$ref"]}}
+        if isinstance(it, dict) and it.get("played") is not False:
+            full.append(it)
+    if not full:
+        return {}
+    allrefs = [(_ref(it.get("event")) + _ref(it.get("competition"))) for it in full]
+    ufc_count = sum("/leagues/ufc/" in r for r in allrefs)
+    # orient newest-first: resolve both ends, keep the order whose head is newer
+    head, tail = _resolve_item(full[0], fid), (_resolve_item(full[-1], fid) if len(full) > 1 else None)
+    if head and tail and tail["_d"] > head["_d"]:
+        full.reverse()
+        head, tail = tail, head
+    bouts = [b for b in (head,) if b]
+    for it in full[1:]:
+        if len(bouts) >= EVENTLOG_BOUTS:
+            break
+        b = tail if (it is full[-1] and tail) else _resolve_item(it, fid)
+        if b:
+            bouts.append(b)
+    bouts.sort(key=lambda h: h["_d"], reverse=True)
+    return {"bouts": bouts, "count": len(full), "ufc_count": ufc_count or None, "source": "ESPN eventlog"}
+
+
 def _fetch_history(fid: str) -> dict:
-    """Fight history: ESPN fight-history / gamelog feeds (first one with bouts wins)."""
+    """Fight history: core eventlog (+ fightcenter per event) first, then fight-history / gamelog feeds."""
+    try:
+        d = _eventlog_history(fid)
+        if d.get("bouts"):
+            return d
+    except Exception:
+        pass
     for url in (f"{WEB}/mma/athletes/{fid}/fighthistory", f"{WEB}/mma/athletes/{fid}/gamelog",
                 f"{SITE_MMA}/athletes/{fid}/gamelog", f"{WEB}/mma/ufc/athletes/{fid}/gamelog"):
         try:
@@ -322,10 +514,28 @@ def _fetch_history(fid: str) -> dict:
     return {}
 
 
+def _fetch_records(fid: str) -> dict:
+    """Career record splits (tkos / submissions / decisions / lossesByKo ...) from core /records."""
+    try:
+        raw = http_json(f"{CORE}/athletes/{fid}/records", retries=1)
+    except Exception:
+        return {}
+    items = []
+    for it in raw.get("items") or []:
+        if isinstance(it, dict) and "$ref" in it and len(it) == 1:
+            try:
+                it = http_json(_ref(it), retries=1)
+            except Exception:
+                continue
+        items.append(it)
+    return {"items": items}
+
+
 def prefetch_fighter(fid: str) -> None:
     disk_cached(f"fighter|{fid}", TTL_FIGHTER, lambda: _fetch_athlete(fid))
     disk_cached(f"fighterstats|{fid}", TTL_FIGHTER, lambda: _fetch_stats(fid))
-    disk_cached(f"fighterhist|{fid}", TTL_FIGHTER, lambda: _fetch_history(fid))
+    disk_cached(f"fighterhist2|{fid}", TTL_FIGHTER, lambda: _fetch_history(fid))
+    disk_cached(f"fighterrec|{fid}", TTL_FIGHTER, lambda: _fetch_records(fid))
 
 
 def _find_record(obj) -> str:
@@ -386,6 +596,8 @@ def parse_history(raw: dict) -> list[dict]:
     seasonTypes[].categories[].events[] aligned to names/labels; also accepts a plain events list."""
     if not isinstance(raw, dict):
         return []
+    if isinstance(raw.get("bouts"), list):  # already normalized (core eventlog path)
+        return raw["bouts"]
     evs = raw.get("events") or raw.get("fights") or raw.get("fightHistory") or {}
     if isinstance(evs, list):
         evs = {str(e.get("id") or e.get("eventId") or i): e for i, e in enumerate(evs) if isinstance(e, dict)}
@@ -454,20 +666,17 @@ def fighter_profile(fid: str, card_fighter: dict, weight_class: str = "") -> dic
             "stance": "", "weight_class": weight_class, "stats": {}, "est": [], "methods": None,
             "methods_est": False, "detail_ok": False, "finish_rounds": [], "recent": [], "losses_by": {},
             "ufc_bouts": None, "bouts_listed": 0, "src": []}
-    raw, raw_stats, raw_hist = {}, {}, {}
+    got = {}
     if fid:
-        for key, fn in ((f"fighter|{fid}", _fetch_athlete), (f"fighterstats|{fid}", _fetch_stats),
-                        (f"fighterhist|{fid}", _fetch_history)):
+        for key, fn in (("bio", _fetch_athlete), ("stats", _fetch_stats), ("hist", _fetch_history),
+                        ("rec", _fetch_records)):
+            ck = {"bio": f"fighter|{fid}", "stats": f"fighterstats|{fid}", "hist": f"fighterhist2|{fid}",
+                  "rec": f"fighterrec|{fid}"}[key]
             try:
-                val = disk_cached(key, TTL_FIGHTER, lambda fn=fn: fn(fid))
+                got[key] = disk_cached(ck, TTL_FIGHTER, lambda fn=fn: fn(fid)) or {}
             except Exception:
-                val = {}
-            if key.startswith("fighter|"):
-                raw = val
-            elif key.startswith("fighterstats"):
-                raw_stats = val
-            else:
-                raw_hist = val
+                got[key] = {}
+    raw, raw_stats, raw_hist, raw_rec = (got.get(k, {}) for k in ("bio", "stats", "hist", "rec"))
     a = raw.get("athlete", raw) if isinstance(raw, dict) else {}
     if a:
         prof["detail_ok"] = True
@@ -489,10 +698,12 @@ def fighter_profile(fid: str, card_fighter: dict, weight_class: str = "") -> dic
             prof["country"] = fl.get("alt") or prof["country"]
         prof["country"] = prof["country"] or a.get("citizenship", "")
     s = _norm_stats(flatten_stats(raw_stats))
-    for k, v in _norm_stats(flatten_stats(raw)).items():
-        s.setdefault(k, v)
+    rec = _norm_stats(flatten_stats(raw_rec))
+    for src in (rec, _norm_stats(flatten_stats(raw))):
+        for k, v in src.items():
+            s.setdefault(k, v)
     if not any(prof["record"]):
-        summary = _find_record(raw) or _find_record(raw_stats)
+        summary = _find_record(raw) or _find_record(raw_rec) or _find_record(raw_stats)
         if summary:
             prof["record"] = _record(summary)
     if prof["reach"] is None:
@@ -531,8 +742,9 @@ def fighter_profile(fid: str, card_fighter: dict, weight_class: str = "") -> dic
         prof["src"].append("ESPN fight history")
         ufc_only = [h for h in hist if h["ufc"]]
         prof["recent"] = (ufc_only or hist)[:5]
-        prof["bouts_listed"] = len(hist)
-        prof["ufc_bouts"] = len(ufc_only) if ufc_only else None
+        prof["bouts_listed"] = int(raw_hist.get("count") or len(hist)) if isinstance(raw_hist, dict) else len(hist)
+        prof["ufc_bouts"] = (raw_hist.get("ufc_count") if isinstance(raw_hist, dict) and raw_hist.get("ufc_count")
+                             else (len(ufc_only) if ufc_only else None))
         wins = [h for h in hist if h["result"] == "W"]
         ko = sum(h["code"] == "KO" for h in wins)
         sub = sum(h["code"] == "SUB" for h in wins)
@@ -542,7 +754,15 @@ def fighter_profile(fid: str, card_fighter: dict, weight_class: str = "") -> dic
         prof["finish_rounds"] = [h["round"] for h in wins if h["code"] in ("KO", "SUB") and h["round"] > 0]
         losses = [h for h in hist if h["result"] == "L"]
         prof["losses_by"] = {c: sum(h["code"] == c for h in losses) for c in ("KO", "SUB", "DEC")}
-    # career method totals in the stats payload win when they cover more fights than the listed history
+    if rec:
+        prof["src"].append("ESPN records")
+    lko = pick(rec, "lossesbyko", "lossesbytko", "lossesbykotko", "kolosses", "tkolosses")
+    lsub = pick(rec, "lossesbysubmission", "lossesbysub", "sublosses", "submissionlosses")
+    ldec = pick(rec, "lossesbydecision", "lossesbydec", "declosses", "decisionlosses")
+    if lko is not None or lsub is not None:
+        prof["losses_by"] = {"KO": int(lko or 0), "SUB": int(lsub or 0),
+                             "DEC": int(ldec) if ldec is not None else prof["losses_by"].get("DEC", 0)}
+    # career method totals (records / stats) win when they cover more fights than the listed history
     ko = pick(s, "tkowins", "kowins", "tkos", "knockouts", "kotko", "tko", "kotkowins")
     sub = pick(s, "submissionwins", "subwins", "submissions", "sub")
     dec = pick(s, "decisionwins", "decwins", "decisions", "dec")
