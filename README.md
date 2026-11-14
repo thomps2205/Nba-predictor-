@@ -85,6 +85,7 @@ streamlit run app.py
   * Basketball: PTS / REB / AST / PRA.
   * NFL: passing, rushing and receiving yards, and receptions.
   * NHL: goals (with anytime-goal %), assists, shots and points.
+* **Prop results on finished games:** finished matchup cards get a "Prop results" drawer (BET record, e.g. 5-3, plus each pick with its line, projection, final stat and ✅ WON / ❌ LOST / ➖ PUSH). Picks are rebuilt as they stood pregame (projection from games before tip-off; posted line if still available, else the implied line) and graded against ESPN's final box score (game summary). The Player Props tab shows result chips and "Final X · WON" on the report. Grades the first 6 finished games per view (toggle).
 * **Parlays only use games that haven't started** (pregame state and tip-off still in the future). A window toggle switches between the selected slate's remaining games and the next 3 days; when the slate has already tipped off, the tab switches to upcoming games automatically. MIX has the same Today / Next 3 days toggle.
 * **Parlays** appear as a tab in every sport, plus a **MIX** view in the sport switcher that combines today's
   legs from all five sports.

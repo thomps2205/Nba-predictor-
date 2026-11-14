@@ -107,6 +107,15 @@ display:flex;align-items:center;justify-content:center;color:var(--muted);font-s
 .pk .nm{font-weight:700;font-size:.95rem;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .pk .rec{font-size:.8rem;margin-top:2px}
 .pk .ed{font-size:.72rem;font-family:ui-monospace,Menlo,monospace;text-align:right;min-width:62px}
+.res{display:inline-block;font-size:.66rem;font-weight:800;padding:2px 7px;border-radius:7px;white-space:nowrap}
+.res.won{background:rgba(61,220,132,.16);color:var(--green)}
+.res.lost{background:rgba(244,63,94,.16);color:var(--pink)}
+.res.push{background:#24262c;color:var(--muted)}
+.final-res{margin-top:12px;font-size:.85rem;padding:6px 10px}
+.resrow{display:flex;align-items:center;gap:8px;padding:9px 0;border-top:1px solid var(--line)}
+.resrow .rn{flex:1;min-width:0;font-size:.86rem;color:var(--text)}
+.resrow .rn small{display:block;color:var(--muted);font-size:.72rem;margin-top:2px}
+.resrow .ra{font-weight:800;font-size:1rem;min-width:30px;text-align:right;font-variant-numeric:tabular-nums}
 .pklist{background:var(--card);border:1px solid var(--line);border-radius:18px;overflow:hidden;margin-bottom:12px}
 </style>
 """
@@ -154,11 +163,21 @@ def pick_row(r: dict, m: str, label: str, info: dict, conf: int) -> str:
     vb = info["verdict"]["verdict"]
     cls, ic = {"BET": ("bet", "🟢"), "NO LINE": ("noline", "⚪")}.get(vb, ("pass", "🟡"))
     pill = f'<span class="vpill {cls} sm">{ic} {vb}</span>'
+    res = _result_chip(r)
     return (f'<div class="pk">{_shot(r["Headshot"], r["Player"], "shot")}<div class="mid">'
             f'<div class="nm">{esc(r["Player"])}</div><div class="rec"><b class="{"pos" if over else "neg"}">{side}</b> '
-            f'{line:g} {esc(label)} {pill}</div></div>'
+            f'{line:g} {esc(label)} {pill} {res}</div></div>'
             f'<div class="ed {"pos" if vb == "BET" else "amb" if vb == "PASS" else "mut"}">+{abs(edge):.1f} edge</div>'
             f'{ring(conf, True)}</div>')
+
+
+def _result_chip(r: dict) -> str:
+    res, act = r.get("_result"), r.get("_actual")
+    if not res:
+        return ""
+    cls, txt = {"WON": ("won", "✅"), "LOST": ("lost", "❌"), "PUSH": ("push", "➖")}[res]
+    a = f"{act:.0f}" if float(act).is_integer() else f"{act:.1f}"
+    return f'<span class="res {cls}">{txt} {a}</span>'
 
 
 def _fmt(v: float, small: bool) -> str:
@@ -190,7 +209,9 @@ def report(sport_label: str, r: dict, m: str, label: str, kind: str, info: dict,
             f'<div class="rp-sec"><div class="rp-head">{_shot(r["Headshot"], r["Player"])}<div>'
             f'<div class="rp-name">{esc(r["Player"])}</div><div class="rp-sub">{esc(label)} · vs. {esc(opp_name)}</div></div>'
             f'<div class="rp-team">{esc(r["Team"])}</div></div>'
-            f'<div class="rp-line"><div><div class="lbl2">Line · {esc(info["label"])}</div>'
+            + (f'<div class="final-res res {dict(WON="won", LOST="lost", PUSH="push")[r["_result"]]}">Final '
+               f'{r["_actual"]:g} · {"Over" if over else "Under"} {line:g} {r["_result"]}</div>' if r.get("_result") else "")
+            + f'<div class="rp-line"><div><div class="lbl2">Line · {esc(info["label"])}</div>'
             f'<div class="rp-big">{line:g}</div></div>{stats}</div>')
 
     # --- last-10 bars (oldest -> newest)

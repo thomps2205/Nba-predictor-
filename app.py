@@ -31,10 +31,11 @@ import engine.ufc
 import engine.ufcstats
 import engine.decide
 import engine.report
+import engine.grade
 import engine.ui
 
 _ENGINE = [engine.common, engine.decide, engine.espn, engine.teams, engine.props, engine.lines, engine.news, engine.ufc,
-           engine.ufcstats, engine.parlays, engine.ui, engine.report]  # dependency order
+           engine.ufcstats, engine.parlays, engine.ui, engine.report, engine.grade]  # dependency order
 
 
 @st.cache_resource(show_spinner=False)
@@ -58,7 +59,7 @@ def _refresh_engine() -> None:
 
 _refresh_engine()
 
-from engine import decide, report, espn, lines as linesmod, news as newsmod, parlays, props as propmod, teams, ufc, ufcstats  # noqa: E402
+from engine import decide, grade, report, espn, lines as linesmod, news as newsmod, parlays, props as propmod, teams, ufc, ufcstats  # noqa: E402
 from engine.common import ET, NOTES, cache_fresh, clear_disk_cache, fmt_spread, ml_to_prob, norm_name  # noqa: E402
 from engine.espn import LEAGUES, League  # noqa: E402
 from engine.ui import (CSS, H, avatar_html, edge_badge, empty_card, esc, ladder_html,  # noqa: E402
@@ -436,6 +437,73 @@ def game_alt_html(g: dict, lad: dict, kind: str) -> str:
             'Main line highlighted.</div></details>')
 
 
+@st.cache_data(ttl=3600, show_spinner=False, max_entries=64)
+def graded_props(lg_key: str, gid: str, q: float, tick: int, _game: dict, _slate: dict, _inj: list) -> list[dict]:
+    """Pregame picks for a finished game (projection from games before tip-off, posted or implied line)
+    graded against the final box score."""
+    lg_ = LEAGUES[lg_key]
+    kind = lg_.kind
+    if kind not in propmod.MARKETS or gid not in _slate["projections"]:
+        return []
+    df = compute_props(lg_key, gid, q, tick, _game, _slate["projections"][gid], _slate["profiles"], _slate["base"],
+                       _slate["b2b"], _inj)
+    box = grade.box_stats(lg_, gid)
+    if df.empty or not box:
+        return []
+    book = cached_espn_props(lg_key, gid, tick)
+    out = []
+    for r in df.to_dict("records"):
+        row = box.get(str(r["Id"]))
+        for m, label in propmod.MARKETS[kind]:
+            if f"P_{m}" not in r:
+                continue
+            floor = propmod.MIN_AVG.get(kind, {}).get(m)
+            if floor is not None and max(r.get(f"A5_{m}") or 0, r[f"P_{m}"]) < floor:
+                continue
+            info = prop_line_info(r, m, label, kind, linesmod.lookup(book, r["Id"], r["Player"], m), 0)
+            v = info["verdict"]
+            if v["verdict"] == "NO LINE":
+                continue
+            side = "Over" if r[f"P_{m}"] > info["line"] else "Under"
+            act = grade.actual_value(kind, m, row)
+            res = grade.result(side, info["line"], act)
+            if res is None:
+                continue
+            out.append({"player": r["Player"], "id": r["Id"], "team": r["Team"], "label": label, "m": m,
+                        "side": side, "line": info["line"], "src": info["src"], "verdict": v["verdict"],
+                        "actual": act, "result": res, "proj": r[f"P_{m}"]})
+    return out
+
+
+def results_drawer(rows: list[dict]) -> str:
+    if not rows:
+        return ""
+    bets = [r for r in rows if r["verdict"] == "BET"]
+    passes = [r for r in rows if r["verdict"] != "BET"]
+
+    def rec(rs):
+        w, l_, p_ = (sum(r["result"] == k for r in rs) for k in ("WON", "LOST", "PUSH"))
+        return f"{w}-{l_}" + (f"-{p_}" if p_ else "")
+
+    def line_html(r):
+        chip = {"WON": ("won", "✅ WON"), "LOST": ("lost", "❌ LOST"), "PUSH": ("push", "➖ PUSH")}[r["result"]]
+        tag = '<span class="vpill bet sm">BET</span>' if r["verdict"] == "BET" else '<span class="vpill pass sm">PASS</span>'
+        act = f'{r["actual"]:.0f}' if float(r["actual"]).is_integer() else f'{r["actual"]:.1f}'
+        return (f'<div class="resrow"><div class="rn"><b>{esc(r["player"])}</b> {tag}<small>{esc(r["side"])} '
+                f'{r["line"]:g} {esc(r["label"])} · proj {r["proj"]:.1f}</small></div>'
+                f'<div class="ra">{act}</div><span class="res {chip[0]}">{chip[1]}</span></div>')
+
+    head = f"Prop results · BETs {rec(bets)}" if bets else "Prop results · no BET picks"
+    body = "".join(line_html(r) for r in bets)
+    if passes:
+        body += (f'<div class="pt-note">PASS picks went {rec(passes)} — top {min(len(passes), 8)} shown</div>'
+                 + "".join(line_html(r) for r in sorted(passes, key=lambda r: -abs(r["proj"] - r["line"]))[:8]))
+    return (f'<details class="pdrawer"><summary>{esc(head)}</summary>{body}'
+            '<div class="pt-note">Graded against the final box score. Picks are rebuilt as they stood pregame: the '
+            'projection only uses games before tip-off; the line is the posted one if still available, else the '
+            'implied line.</div></details>')
+
+
 @st.fragment
 def matchups_fragment(games: list[dict], slate_for, b2b: set, kind: str, soccer: bool = False) -> None:
     """Market period pill bar + matchup cards (each with a Period & Half Breakdown drawer)."""
@@ -448,6 +516,12 @@ def matchups_fragment(games: list[dict], slate_for, b2b: set, kind: str, soccer:
     if len(segs) > 1:
         code = st.segmented_control("Market period", list(labels), default="FG", key=f"period_{sport}",
                                     format_func=labels.get, label_visibility="collapsed", width="stretch") or "FG"
+    finished = [g for g in games if g["state"] == "post"]
+    do_grade = False
+    if finished and kind in propmod.MARKETS and code == "FG":
+        do_grade = st.toggle(f"Show prop results on finished games (first {GRADE_CAP}, loads player logs)",
+                             value=True, key=f"grade_{sport}")
+    graded_n = 0
     if code != "FG":
         note(f"{labels[code]} markets: each team's real scoring and conceding splits for that segment (ESPN period "
              "scores, last 15 games) applied to the full-game projection. Model prices only — ESPN doesn't list "
@@ -487,6 +561,17 @@ def matchups_fragment(games: list[dict], slate_for, b2b: set, kind: str, soccer:
             if g["state"] == "in":
                 v["reason"] = "Pregame call vs implied closing line · " + v["reason"]
             extra += verdict_html(v)
+        if do_grade and g["state"] == "post" and p and graded_n < GRADE_CAP:
+            graded_n += 1
+            try:
+                prefetch_players(lg_, g)
+                try:
+                    inj_ = espn.injuries(lg_)
+                except Exception:
+                    inj_ = []
+                extra += results_drawer(graded_props(lg_.key, g["id"], float(q_sit), bucket(60), g, sl, inj_))
+            except Exception as e:
+                NOTES[f"grade {g['id']}"] = f"Couldn't grade props for {g['away']['abbr']} @ {g['home']['abbr']} ({e})."
         extra += period_drawer(lg_, g, p, ph, pa_)
         if extra and card.endswith("</div>"):
             card = card[:-6] + extra + "</div>"
@@ -891,8 +976,13 @@ def props_fragment(games: list[dict], slate: dict, inj: list[dict]) -> None:
         r["_info"] = prop_line_info(r, m, mlabels[m], kind, linesmod.lookup(book, r["Id"], r["Player"], m), tier)
         r["_e"] = abs(r[f"P_{m}"] - r["_info"]["line"])
     # BET cards first, then posted lines, then biggest edges
+    box = grade.box_stats(lg, gid) if g["state"] == "post" else {}
     for r in recs:
         r["_conf"] = report.confidence(r, m, r["_info"])
+        if box:
+            act = grade.actual_value(kind, m, box.get(str(r["Id"])))
+            side = "Over" if r[f"P_{m}"] > r["_info"]["line"] else "Under"
+            r["_actual"], r["_result"] = act, grade.result(side, r["_info"]["line"], act)
     rank = {"BET": 0, "PASS": 1, "NO LINE": 2}
     recs.sort(key=lambda r: (rank.get(r["_info"]["verdict"]["verdict"], 3),
                              not r["_info"]["verdict"].get("lean", True), -r["_conf"], -r["_e"]))
@@ -1271,6 +1361,7 @@ def upcoming_games(sk: str, days: int = 3, cap: int = 16) -> list[dict]:
     return games[:cap]
 
 
+GRADE_CAP = 6
 PARLAY_WINDOWS = ["Not started (this slate)", "Next 3 days"]
 
 
