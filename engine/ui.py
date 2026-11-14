@@ -196,6 +196,7 @@ margin:16px 4px 8px;display:flex;align-items:center;gap:8px}
 .tot .m{color:var(--muted);font-size:.62rem;text-transform:uppercase;letter-spacing:.07em;text-align:center}
 .tot .adv{color:var(--green)}
 .tot.bk{grid-template-columns:1fr 1.7fr 1fr}
+.tot .est{color:var(--muted);font-style:italic}
 .mbar{display:flex;align-items:center;gap:8px;margin:5px 0}
 .mbar .lab{width:92px;font-size:.74rem;color:var(--muted)}
 .mbar .track{flex:1;height:8px;background:var(--card2);border-radius:999px;overflow:hidden}

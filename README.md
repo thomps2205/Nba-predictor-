@@ -16,14 +16,16 @@ ESPN's public JSON is the primary source for every sport:
 | Rosters and headshots | `…/teams/{id}/roster` |
 | Player game logs | `site.web.api.espn.com/apis/common/v3/sports/{sport}/{league}/athletes/{id}/gamelog` |
 | Injuries (NBA, NFL, NHL) | `…/{league}/injuries` |
-| UFC fight cards and fighter profiles | `…/mma/ufc/scoreboard`, `site.web.api.espn.com/apis/common/v3/sports/mma/athletes/{id}` |
+| UFC fight cards | `…/mma/ufc/scoreboard` |
+| UFC bio and record (age, height, reach, stance) | `sports.core.api.espn.com/v2/sports/mma/athletes/{id}` |
+| UFC career stats (SLpM, SApM, accuracy, defense, TD avg/acc/def, sub avg) | `sports.core.api.espn.com/v2/sports/mma/athletes/{id}/statistics` |
+| UFC fight history (method, round, time, opponent; drives method splits and recent form) | `site.web.api.espn.com/apis/common/v3/sports/mma/athletes/{id}/fighthistory`, then `…/gamelog`, then `site.api.espn.com/apis/site/v2/sports/mma/athletes/{id}/gamelog` |
 
-Three outside sources add information ESPN doesn't have:
+Two outside sources add information ESPN doesn't have:
 
 | Extra data | Source | Fallback |
 |---|---|---|
 | Live player prop lines + prices | ESPN sportsbook prop bets (`sports.core.api.espn.com/…/competitions/{id}/odds/{provider}/propBets`, matched by athlete id) | PrizePicks board, then Underdog Fantasy |
-| Official UFC fighter stats and win methods | UFCStats.com search + fighter-details pages | ESPN fighter stats |
 | Latest player news | ESPN news feeds (`…/{league}/news`, league-wide and per team), matched by athlete ID | — |
 
 Each extra source is cached for 10 minutes to 7 days and skipped for 30 minutes after a failure. When a prop has
@@ -191,7 +193,11 @@ streamlit run app.py
     * Durability and finish rate: share of wins by KO, submission and decision, the stoppage rate, UFC losses
       by KO or submission, and UFC experience.
     * Recent form: the last 5 UFC bouts with the result, opponent, method, round, time and date. These come
-      from UFCStats.com fight history.
+      from ESPN fight history.
+  * **All UFC fighter data comes from ESPN; UFCStats.com is no longer scraped.** When ESPN has no figure for a
+    fighter, for example a debut or a null stat, the app shows the weight class's divisional average instead of
+    a dash. Those values are marked ≈ and are also what the model uses. When there is no fight history, method
+    splits use the weight class's finish rates.
   * **Moneyline fallback:** if ESPN's scoreboard has no moneyline, the app uses the saved pregame or closing
     line. If there is none, it tries ESPN's core per-bout odds feed. If that is empty too, it shows the
     model's fair odds, labelled "model fair".

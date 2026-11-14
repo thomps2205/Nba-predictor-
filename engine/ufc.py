@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from datetime import date, timedelta
 
 from .common import (cache_fresh, cache_read, cache_write, disk_cached, flatten_stats, http_json, inches, ml_to_prob, num, pick, to_et,
@@ -251,8 +252,36 @@ def ensure_moneylines(card: dict) -> None:
 # --------------------------------------------------------------------------
 # Fighter profiles
 # --------------------------------------------------------------------------
+SITE_MMA = "https://site.api.espn.com/apis/site/v2/sports/mma"
+
+# Approximate UFC divisional career averages, used only when ESPN has no stats for a fighter (debuts / nulls).
+DIV_AVG = {
+    "heavyweight": dict(slpm=3.6, sapm=3.5, str_acc=48, str_def=52, td_avg=0.9, td_acc=35, td_def=62, sub_avg=0.3),
+    "light heavyweight": dict(slpm=3.8, sapm=3.7, str_acc=47, str_def=53, td_avg=1.1, td_acc=36, td_def=62, sub_avg=0.4),
+    "middleweight": dict(slpm=4.0, sapm=3.8, str_acc=47, str_def=55, td_avg=1.3, td_acc=37, td_def=64, sub_avg=0.5),
+    "welterweight": dict(slpm=4.0, sapm=3.7, str_acc=46, str_def=56, td_avg=1.6, td_acc=38, td_def=64, sub_avg=0.5),
+    "lightweight": dict(slpm=4.2, sapm=3.8, str_acc=45, str_def=56, td_avg=1.7, td_acc=37, td_def=63, sub_avg=0.6),
+    "featherweight": dict(slpm=4.4, sapm=4.0, str_acc=44, str_def=56, td_avg=1.5, td_acc=36, td_def=62, sub_avg=0.6),
+    "bantamweight": dict(slpm=4.6, sapm=4.1, str_acc=44, str_def=57, td_avg=1.6, td_acc=37, td_def=61, sub_avg=0.5),
+    "flyweight": dict(slpm=4.3, sapm=3.8, str_acc=45, str_def=57, td_avg=1.7, td_acc=36, td_def=61, sub_avg=0.5),
+    "women": dict(slpm=4.5, sapm=4.0, str_acc=45, str_def=56, td_avg=1.5, td_acc=38, td_def=60, sub_avg=0.4),
+    "default": dict(slpm=4.1, sapm=3.8, str_acc=46, str_def=55, td_avg=1.4, td_acc=37, td_def=62, sub_avg=0.5),
+}
+
+
+def div_avg(weight_class: str) -> dict:
+    wc = (weight_class or "").lower()
+    if "women" in wc:
+        return DIV_AVG["women"]
+    for k in ("light heavyweight", "heavyweight", "middleweight", "welterweight", "lightweight", "featherweight",
+              "bantamweight", "flyweight"):
+        if k in wc:
+            return DIV_AVG[k]
+    return DIV_AVG["default"]
+
+
 def fighter_keys(fid: str) -> list[str]:
-    return [f"fighter|{fid}", f"fighterstats|{fid}"]
+    return [f"fighter|{fid}", f"fighterstats|{fid}", f"fighterhist|{fid}"]
 
 
 def fighter_cached(fid: str) -> bool:
@@ -272,15 +301,31 @@ def _fetch_athlete(fid: str) -> dict:
 def _fetch_stats(fid: str) -> dict:
     for url in (f"{CORE}/athletes/{fid}/statistics", f"{WEB}/mma/athletes/{fid}/stats"):
         try:
-            return http_json(url, retries=1)
+            d = http_json(url, retries=1)
+            if d:
+                return d
         except Exception:
             continue
+    return {}
+
+
+def _fetch_history(fid: str) -> dict:
+    """Fight history: ESPN fight-history / gamelog feeds (first one with bouts wins)."""
+    for url in (f"{WEB}/mma/athletes/{fid}/fighthistory", f"{WEB}/mma/athletes/{fid}/gamelog",
+                f"{SITE_MMA}/athletes/{fid}/gamelog", f"{WEB}/mma/ufc/athletes/{fid}/gamelog"):
+        try:
+            d = http_json(url, retries=1)
+        except Exception:
+            continue
+        if parse_history(d):
+            return d
     return {}
 
 
 def prefetch_fighter(fid: str) -> None:
     disk_cached(f"fighter|{fid}", TTL_FIGHTER, lambda: _fetch_athlete(fid))
     disk_cached(f"fighterstats|{fid}", TTL_FIGHTER, lambda: _fetch_stats(fid))
+    disk_cached(f"fighterhist|{fid}", TTL_FIGHTER, lambda: _fetch_history(fid))
 
 
 def _find_record(obj) -> str:
@@ -302,31 +347,139 @@ def _find_record(obj) -> str:
     return ""
 
 
-def fighter_profile(fid: str, card_fighter: dict, ufcs: dict | None = None) -> dict:
+# ---- fight history -------------------------------------------------------
+def _txt(v) -> str:
+    if isinstance(v, dict):
+        return str(v.get("displayName") or v.get("shortDisplayName") or v.get("text") or v.get("description")
+                   or v.get("name") or v.get("abbreviation") or "")
+    return "" if v is None else str(v)
+
+
+def _method_code(m: str) -> str:
+    u = (m or "").upper()
+    if "DQ" in u or "DISQUAL" in u or "KO" in u or "KNOCKOUT" in u:
+        return "KO"
+    if "SUB" in u:
+        return "SUB"
+    if "DEC" in u or "UNANIMOUS" in u or "SPLIT" in u or "MAJORITY" in u:
+        return "DEC"
+    return ""
+
+
+def _method_label(m: str) -> str:
+    c, u = _method_code(m), (m or "").upper()
+    if c == "KO":
+        return "DQ" if "DQ" in u or "DISQUAL" in u else "KO/TKO"
+    if c == "SUB":
+        return "SUB"
+    if c == "DEC":
+        return "S-DEC" if "SPLIT" in u or "S-DEC" in u else "M-DEC" if "MAJORITY" in u or "M-DEC" in u else "U-DEC"
+    return (m or "").strip()[:14]
+
+
+_COLS = {"method": ("method", "decision", "result", "res", "dec", "wintype", "howwon"),
+         "round": ("round", "rnd", "rd", "r", "period"), "time": ("time", "clock", "displayclock")}
+
+
+def parse_history(raw: dict) -> list[dict]:
+    """Bouts (newest first) from ESPN gamelog-style payloads: top-level events {id: meta} + rows in
+    seasonTypes[].categories[].events[] aligned to names/labels; also accepts a plain events list."""
+    if not isinstance(raw, dict):
+        return []
+    evs = raw.get("events") or raw.get("fights") or raw.get("fightHistory") or {}
+    if isinstance(evs, list):
+        evs = {str(e.get("id") or e.get("eventId") or i): e for i, e in enumerate(evs) if isinstance(e, dict)}
+    if not isinstance(evs, dict) or not evs:
+        return []
+    names = [re.sub(r"[^a-z]", "", str(x).lower()) for x in (raw.get("names") or raw.get("labels") or [])]
+    labels = [re.sub(r"[^a-z]", "", str(x).lower()) for x in (raw.get("labels") or [])]
+
+    def col(kind):
+        for cand in _COLS[kind]:
+            for arr in (names, labels):
+                if cand in arr:
+                    return arr.index(cand)
+        return None
+
+    ci = {k: col(k) for k in _COLS}
+    rows = {}
+    for stp in raw.get("seasonTypes") or []:
+        for cat in stp.get("categories") or []:
+            for e in cat.get("events") or []:
+                if isinstance(e, dict) and e.get("eventId") is not None:
+                    rows[str(e["eventId"])] = e.get("stats") or []
+    out = []
+    for eid, e in evs.items():
+        if not isinstance(e, dict):
+            continue
+        st = rows.get(str(eid), [])
+
+        def cell(kind):
+            i = ci[kind]
+            return st[i] if i is not None and i < len(st) else None
+
+        res = _txt(e.get("gameResult") or e.get("result") or e.get("outcome")).strip().upper()[:1]
+        if res not in ("W", "L", "D", "N"):
+            w = e.get("winner")
+            res = "W" if w is True else "L" if w is False else ""
+        if not res:
+            continue
+        method_raw = (cell("method") or _txt(e.get("method")) or _txt(e.get("decision")) or _txt(e.get("winMethod"))
+                      or _txt(e.get("resultDescription")) or _txt((e.get("status") or {}).get("result"))
+                      or _txt(e.get("eventNote")) or "")
+        rnd = cell("round") or e.get("round") or e.get("period") or (e.get("status") or {}).get("period")
+        tm = cell("time") or e.get("time") or e.get("clock") or (e.get("status") or {}).get("displayClock") or ""
+        opp = e.get("opponent") or e.get("opponentAthlete") or {}
+        when = str(e.get("gameDate") or e.get("date") or "")
+        d = to_et_date(when) if when else None
+        league = _txt(e.get("league") or e.get("leagueName") or e.get("leagueAbbreviation"))
+        out.append({"result": res, "method": _method_label(method_raw), "code": _method_code(method_raw),
+                    "detail": method_raw if _method_label(method_raw) != method_raw else "",
+                    "round": int(num(rnd, 0)), "time": str(tm), "opponent": _txt(opp),
+                    "event": _txt(e.get("eventName") or e.get("name") or e.get("shortName")),
+                    "date": f"{d:%b %d, %Y}" if d else "", "_d": d.isoformat() if d else "",
+                    "ufc": "ufc" in (league + " " + _txt(e.get("eventName") or e.get("name"))).lower()})
+    out.sort(key=lambda h: h["_d"], reverse=True)
+    return out
+
+
+def _norm_stats(s: dict) -> dict:
+    return {re.sub(r"[^a-z0-9]", "", k): v for k, v in s.items()}
+
+
+def fighter_profile(fid: str, card_fighter: dict, weight_class: str = "") -> dict:
     prof = {"name": card_fighter["name"], "headshot": card_fighter.get("headshot", ""),
             "flag": card_fighter.get("flag", ""), "country": card_fighter.get("country", ""),
             "record": _record(card_fighter.get("record", "")), "age": None, "height": None, "reach": None,
-            "stance": "", "weight_class": "", "stats": {}, "methods": None, "detail_ok": False}
-    raw, raw_stats = {}, {}
+            "stance": "", "weight_class": weight_class, "stats": {}, "est": [], "methods": None,
+            "methods_est": False, "detail_ok": False, "finish_rounds": [], "recent": [], "losses_by": {},
+            "ufc_bouts": None, "bouts_listed": 0, "src": []}
+    raw, raw_stats, raw_hist = {}, {}, {}
     if fid:
-        try:
-            raw = disk_cached(f"fighter|{fid}", TTL_FIGHTER, lambda: _fetch_athlete(fid))
-        except Exception:
-            raw = {}
-        try:
-            raw_stats = disk_cached(f"fighterstats|{fid}", TTL_FIGHTER, lambda: _fetch_stats(fid))
-        except Exception:
-            raw_stats = {}
+        for key, fn in ((f"fighter|{fid}", _fetch_athlete), (f"fighterstats|{fid}", _fetch_stats),
+                        (f"fighterhist|{fid}", _fetch_history)):
+            try:
+                val = disk_cached(key, TTL_FIGHTER, lambda fn=fn: fn(fid))
+            except Exception:
+                val = {}
+            if key.startswith("fighter|"):
+                raw = val
+            elif key.startswith("fighterstats"):
+                raw_stats = val
+            else:
+                raw_hist = val
     a = raw.get("athlete", raw) if isinstance(raw, dict) else {}
     if a:
         prof["detail_ok"] = True
+        prof["src"].append("ESPN bio")
         prof["age"] = num(a.get("age"), default=0) or None
         prof["height"] = inches(a.get("displayHeight")) or inches(a.get("height"))
         prof["reach"] = inches(a.get("displayReach")) or inches(a.get("reach"))
         st = a.get("stance")
         prof["stance"] = (st.get("text") or st.get("name") or "") if isinstance(st, dict) else (st or "")
         wc = a.get("weightClass")
-        prof["weight_class"] = (wc.get("text") or wc.get("shortName") or "") if isinstance(wc, dict) else (wc or "")
+        prof["weight_class"] = prof["weight_class"] or (
+            (wc.get("text") or wc.get("shortName") or "") if isinstance(wc, dict) else (wc or ""))
         hs = a.get("headshot")
         if isinstance(hs, dict) and hs.get("href"):
             prof["headshot"] = hs["href"]
@@ -335,8 +488,9 @@ def fighter_profile(fid: str, card_fighter: dict, ufcs: dict | None = None) -> d
             prof["flag"] = fl["href"]
             prof["country"] = fl.get("alt") or prof["country"]
         prof["country"] = prof["country"] or a.get("citizenship", "")
-    s = flatten_stats(raw)
-    flatten_stats(raw_stats, s)
+    s = _norm_stats(flatten_stats(raw_stats))
+    for k, v in _norm_stats(flatten_stats(raw)).items():
+        s.setdefault(k, v)
     if not any(prof["record"]):
         summary = _find_record(raw) or _find_record(raw_stats)
         if summary:
@@ -344,42 +498,67 @@ def fighter_profile(fid: str, card_fighter: dict, ufcs: dict | None = None) -> d
     if prof["reach"] is None:
         prof["reach"] = pick(s, "reach")
     stats = {
-        "slpm": pick(s, "sigstrikeslandedpermin", "slpm", "sigstrikeslandedperminute", "strikelpm"),
-        "str_acc": pick(s, "sigstrikeaccuracy", "sigstracc", "stracc", "strikeaccuracy"),
-        "sapm": pick(s, "sigstrikesabsorbedpermin", "sapm", "sigstrikesabsorbedperminute"),
-        "str_def": pick(s, "sigstrikedefense", "strdef", "strikedefense"),
-        "td_avg": pick(s, "takedownavg", "tdavg", "takedownsaverage"),
-        "td_acc": pick(s, "takedownaccuracy", "tdacc"),
-        "td_def": pick(s, "takedowndefense", "tddef"),
-        "sub_avg": pick(s, "submissionavg", "subavg", "submissionsaverage"),
+        "slpm": pick(s, "sigstrikeslandedpermin", "slpm", "sigstrikeslandedperminute", "strikelpm",
+                     "strikeslandedperminute", "strikeslandedpermin"),
+        "str_acc": pick(s, "sigstrikeaccuracy", "sigstracc", "stracc", "strikeaccuracy", "sigstrikesaccuracy",
+                        "strikingaccuracy"),
+        "sapm": pick(s, "sigstrikesabsorbedpermin", "sapm", "sigstrikesabsorbedperminute", "strikesabsorbedpermin",
+                     "strikesabsorbedperminute"),
+        "str_def": pick(s, "sigstrikedefense", "strdef", "strikedefense", "strikingdefense"),
+        "td_avg": pick(s, "takedownavg", "tdavg", "takedownsaverage", "takedownaverage", "takedownsper15min",
+                       "takedownsper15"),
+        "td_acc": pick(s, "takedownaccuracy", "tdacc", "takedownsaccuracy"),
+        "td_def": pick(s, "takedowndefense", "tddef", "takedownsdefense"),
+        "sub_avg": pick(s, "submissionavg", "subavg", "submissionsaverage", "submissionaverage", "subattemptsper15"),
     }
+    # derive rates from raw counts when ESPN only gives totals
+    landed, att = pick(s, "sigstrikeslanded", "ssl", "sigstrlanded"), pick(s, "sigstrikesattempted", "ssa")
+    if stats["str_acc"] is None and landed and att:
+        stats["str_acc"] = landed / att * 100
+    tdl, tda = pick(s, "takedownslanded", "tdl"), pick(s, "takedownsattempted", "tda")
+    if stats["td_acc"] is None and tdl is not None and tda:
+        stats["td_acc"] = tdl / tda * 100
     for k in ("str_acc", "str_def", "td_acc", "td_def"):  # fractions (0.52) -> percent
         if stats[k] is not None and 0 < stats[k] <= 1.0:
             stats[k] *= 100
     prof["stats"] = {k: v for k, v in stats.items() if v is not None}
-    ko = pick(s, "tkowins", "kowins", "tkos", "knockouts", "ko/tko")
-    sub = pick(s, "submissionwins", "subwins", "submissions")
-    dec = pick(s, "decisionwins", "decwins", "decisions")
-    if ko is not None and sub is not None and dec is not None and (ko + sub + dec) > 0:
+    if prof["stats"]:
+        prof["src"].append("ESPN career stats")
+
+    # fight history -> method splits, finish rounds, recent form
+    hist = parse_history(raw_hist)
+    if hist:
+        prof["src"].append("ESPN fight history")
+        ufc_only = [h for h in hist if h["ufc"]]
+        prof["recent"] = (ufc_only or hist)[:5]
+        prof["bouts_listed"] = len(hist)
+        prof["ufc_bouts"] = len(ufc_only) if ufc_only else None
+        wins = [h for h in hist if h["result"] == "W"]
+        ko = sum(h["code"] == "KO" for h in wins)
+        sub = sum(h["code"] == "SUB" for h in wins)
+        dec = sum(h["code"] == "DEC" for h in wins)
+        if ko + sub + dec:
+            prof["methods"] = (ko, sub, dec)
+        prof["finish_rounds"] = [h["round"] for h in wins if h["code"] in ("KO", "SUB") and h["round"] > 0]
+        losses = [h for h in hist if h["result"] == "L"]
+        prof["losses_by"] = {c: sum(h["code"] == c for h in losses) for c in ("KO", "SUB", "DEC")}
+    # career method totals in the stats payload win when they cover more fights than the listed history
+    ko = pick(s, "tkowins", "kowins", "tkos", "knockouts", "kotko", "tko", "kotkowins")
+    sub = pick(s, "submissionwins", "subwins", "submissions", "sub")
+    dec = pick(s, "decisionwins", "decwins", "decisions", "dec")
+    if ko is not None and sub is not None and dec is not None and (ko + sub + dec) > sum(prof["methods"] or (0,)):
         prof["methods"] = (ko, sub, dec)
-    prof["ufcstats"] = False
-    if ufcs:  # UFCStats.com: official career stats + win methods override ESPN; physicals fill gaps
-        prof["ufcstats"] = True
-        prof["finish_rounds"] = list(ufcs.get("finish_rounds") or [])
-        prof["recent"] = list(ufcs.get("recent") or [])
-        prof["losses_by"] = dict(ufcs.get("losses_by") or {})
-        prof["ufc_bouts"] = ufcs.get("ufc_bouts")
-        for k in ("height", "reach", "age"):
-            if not prof[k] and ufcs.get(k):
-                prof[k] = ufcs[k]
-        if not prof["stance"] and ufcs.get("stance"):
-            prof["stance"] = ufcs["stance"]
-        if not any(prof["record"]) and ufcs.get("record"):
-            prof["record"] = tuple(ufcs["record"])
-        prof["stats"].update({k: v for k, v in (ufcs.get("stats") or {}).items() if v is not None})
-        if ufcs.get("methods"):
-            prof["methods"] = tuple(ufcs["methods"])
-        prof["detail_ok"] = True
+
+    # fallback: divisional averages for anything ESPN left null (debuts)
+    avg = div_avg(prof["weight_class"])
+    for k, v in avg.items():
+        if k not in prof["stats"]:
+            prof["stats"][k] = float(v)
+            prof["est"].append(k)
+    if prof["methods"] is None:
+        k_, s_, d_ = _prior(prof["weight_class"])
+        prof["methods"] = (k_ * 10, s_ * 10, d_ * 10)
+        prof["methods_est"] = True
     return prof
 
 
