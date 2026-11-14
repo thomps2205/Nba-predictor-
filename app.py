@@ -29,13 +29,14 @@ import engine.props
 import engine.teams
 import engine.ufc
 import engine.ufcstats
+import engine.ufc_props
 import engine.decide
 import engine.report
 import engine.grade
 import engine.ui
 
 _ENGINE = [engine.common, engine.decide, engine.espn, engine.teams, engine.props, engine.lines, engine.news, engine.ufc,
-           engine.ufcstats, engine.parlays, engine.ui, engine.report, engine.grade]  # dependency order
+           engine.ufcstats, engine.ufc_props, engine.parlays, engine.ui, engine.report, engine.grade]  # dependency order
 
 
 @st.cache_resource(show_spinner=False)
@@ -59,7 +60,7 @@ def _refresh_engine() -> None:
 
 _refresh_engine()
 
-from engine import decide, grade, report, espn, lines as linesmod, news as newsmod, parlays, props as propmod, teams, ufc, ufcstats  # noqa: E402
+from engine import decide, grade, report, espn, lines as linesmod, news as newsmod, parlays, props as propmod, teams, ufc, ufc_props, ufcstats  # noqa: E402
 from engine.common import ET, NOTES, cache_fresh, clear_disk_cache, fmt_spread, ml_to_prob, norm_name  # noqa: E402
 from engine.espn import LEAGUES, League  # noqa: E402
 from engine.ui import (CSS, H, avatar_html, edge_badge, empty_card, esc, ladder_html,  # noqa: E402
@@ -1055,7 +1056,12 @@ def compute_card(event_id: str, tick: int, _card: dict) -> list[dict]:
         except Exception as e:
             NOTES[f"bout {b['id']}"] = f"Prediction failed for {fa_['name']} vs {fb_['name']}: {e}"
             continue
-        out.append({"bout": b, "a": pa_, "b": pb_, "pred": pred})
+        try:
+            props_ = ufc_props.breakdown(b, pa_, pb_, pred)
+        except Exception as e:
+            NOTES[f"bout props {b['id']}"] = f"Round/method props failed for {fa_['name']} vs {fb_['name']}: {e}"
+            props_ = None
+        out.append({"bout": b, "a": pa_, "b": pb_, "pred": pred, "props": props_})
     return out
 
 
@@ -1069,7 +1075,7 @@ def _last(name: str) -> str:
 
 def fighter_row(f: dict, prof: dict, p: float, is_pick: bool, won) -> str:
     flag = f'<img class="flag" src="{esc(prof["flag"])}" alt="">' if prof.get("flag") else ""
-    ml = f' · {f["ml"]:+.0f}' if f.get("ml") else ""
+    ml = (f' · {f["ml"]:+.0f}' if f.get("ml") is not None else f' · fair {decide.american(p)} (model)')
     tag = ' <span class="pill ok">W</span>' if won else ""
     return (f'<div class="frow">{avatar_html(prof["headshot"], prof["name"], 46)}'
             f'<div class="tinfo"><div class="fname{" win" if won else ""}">{flag}{esc(prof["name"])}{tag}</div>'
@@ -1097,6 +1103,9 @@ def bout_card(x: dict) -> str:
                  + (f' · mkt {pred["market"] * 100:.0f}%' if pred["market"] else "") + '</span></div>')
     bar = (f'<div class="winbar"><div class="r" style="width:{p * 100:.0f}%"></div>'
            f'<div class="b" style="width:{(1 - p) * 100:.0f}%"></div></div>')
+    src = b.get("ml_src", "")
+    src_html = (f'<div class="ml-src">Odds · {esc(src)}' + (" — no sportsbook line found, fair odds from the model"
+                if src == "model fair" else "") + '</div>') if src and src != "ESPN" else ""
     if b["state"] == "pre":
         fp, f_ = (fa_, pa_) if pred["pick"] == 0 else (fb_, pb_)
         model_only = pred["p_model"] if pred["pick"] == 0 else 1 - pred["p_model"]
@@ -1104,8 +1113,119 @@ def bout_card(x: dict) -> str:
     else:
         v_html = ""
     return (f'<div class="card">{head}' + fighter_row(fa_, pa_, p, pred["pick"] == 0, fa_.get("winner"))
-            + bar + fighter_row(fb_, pb_, 1 - p, pred["pick"] == 1, fb_.get("winner")) + pick_html + v_html
-            + '</div>')
+            + bar + fighter_row(fb_, pb_, 1 - p, pred["pick"] == 1, fb_.get("winner")) + src_html + pick_html
+            + v_html + props_drawer(x) + backing_drawer(x) + '</div>')
+
+
+def props_table(x: dict) -> str:
+    pr = x.get("props")
+    if not pr:
+        return ""
+    la, lb = _last(x["a"]["name"]), _last(x["b"]["name"])
+
+    def cell(p, fair, v):
+        return (f'<span><b>{p * 100:.1f}%</b> <small>{esc(fair)}</small> '
+                f'{(f'<span class="vpill {"bet" if v["verdict"] == "BET" else "pass"} sm">'
+                  f'{"🟢 BET" if v["verdict"] == "BET" else "🟡 PASS"}</span>') if p >= 0.005 else ""}</span>')
+
+    rows = []
+    for r in pr["rows"]:
+        if r["outcome"] == "Round 1":
+            rows.append('<div class="ut sec"><span>Round moneylines (finish in round)</span></div>')
+        rows.append(f'<div class="ut"><span class="sg">{esc(r["outcome"])}</span>'
+                    f'{cell(r["a"], r["fair_a"], r["v_a"])}{cell(r["b"], r["fair_b"], r["v_b"])}</div>')
+    dec = " · ".join(f'{k} {v * 100:.0f}% ({decide.american(v)})' for k, v in pr["dec_types"].items())
+    best = pr.get("best")
+    best_html = (f'<div class="verdict bet"><span class="vpill bet">🟢 BET</span><span class="vtxt"><b>'
+                 f'{esc(best["pick"])}</b> · {esc(best["reason"])}</span></div>') if best else ""
+    mkt = ("Market = vig-free moneyline × weight-class method/round rates + ~15% prop hold (ESPN posts no "
+           "method or round prices)." if pr["market_q"] is not None else
+           "No moneyline found, so no market anchor — fair odds shown, every outcome is PASS.")
+    return (f'{best_html}<div class="ptab"><div class="ut head"><span>Outcome</span><span>{esc(la)} · fair</span>'
+            f'<span>{esc(lb)} · fair</span></div>{"".join(rows)}</div>'
+            f'<div class="pt-note"><b>Goes the distance</b> {pr["distance"] * 100:.0f}% '
+            f'({decide.american(pr["distance"])}) · <b>Inside the distance</b> {pr["inside"] * 100:.0f}% '
+            f'({decide.american(pr["inside"])})</div>'
+            f'<div class="pt-note"><b>Decision type</b> · {esc(dec)}</div><div class="pt-note">{esc(mkt)}</div>')
+
+
+def props_drawer(x: dict) -> str:
+    t = props_table(x)
+    return f'<details class="pdrawer"><summary>Round &amp; Method Props</summary>{t}</details>' if t else ""
+
+
+def backing_drawer(x: dict) -> str:
+    a, b = x["a"], x["b"]
+
+    def f(v, unit="", d=0):
+        return "—" if v is None else f"{v:.{d}f}{unit}"
+
+    def row(lab, va, vb, better=None, unit="", d=0):
+        adv_a = adv_b = False
+        if better and va is not None and vb is not None and va != vb:
+            adv_a = (va > vb) if better == "high" else (va < vb)
+            adv_b = not adv_a
+        return (f'<div class="l{" adv" if adv_a else ""}">{esc(f(va, unit, d))}</div><div class="m">{esc(lab)}</div>'
+                f'<div class="r{" adv" if adv_b else ""}">{esc(f(vb, unit, d))}</div>')
+
+    sa, sb = a["stats"], b["stats"]
+
+    def diff(s):
+        return s["slpm"] - s["sapm"] if "slpm" in s and "sapm" in s else None
+
+    def wins_split(prof):
+        m = prof.get("methods")
+        if not m or not sum(m):
+            return None
+        t = sum(m)
+        return [x_ / t * 100 for x_ in m]
+
+    wa, wb = wins_split(a), wins_split(b)
+    sec = lambda t: f'<div class="sub-h">{esc(t)}</div>'  # noqa: E731
+    strike = (row("Sig. strikes landed / min", sa.get("slpm"), sb.get("slpm"), "high", d=2)
+              + row("Sig. strikes absorbed / min", sa.get("sapm"), sb.get("sapm"), "low", d=2)
+              + row("Striking differential", diff(sa), diff(sb), "high", d=2)
+              + row("Striking accuracy", sa.get("str_acc"), sb.get("str_acc"), "high", "%")
+              + row("Striking defense", sa.get("str_def"), sb.get("str_def"), "high", "%"))
+    grap = (row("Takedowns / 15 min", sa.get("td_avg"), sb.get("td_avg"), "high", d=2)
+            + row("Takedown accuracy", sa.get("td_acc"), sb.get("td_acc"), "high", "%")
+            + row("Takedown defense", sa.get("td_def"), sb.get("td_def"), "high", "%")
+            + row("Submissions / 15 min", sa.get("sub_avg"), sb.get("sub_avg"), "high", d=2))
+    lb_a, lb_b = a.get("losses_by") or {}, b.get("losses_by") or {}
+    fin = (row("Wins by KO/TKO", wa[0] if wa else None, wb[0] if wb else None, None, "%")
+           + row("Wins by submission", wa[1] if wa else None, wb[1] if wb else None, None, "%")
+           + row("Wins by decision", wa[2] if wa else None, wb[2] if wb else None, None, "%")
+           + row("Stoppage rate (wins)", (wa[0] + wa[1]) if wa else None, (wb[0] + wb[1]) if wb else None, "high", "%")
+           + row("UFC losses by KO", lb_a.get("KO"), lb_b.get("KO"), "low")
+           + row("UFC losses by sub", lb_a.get("SUB"), lb_b.get("SUB"), "low")
+           + row("UFC bouts (experience)", a.get("ufc_bouts"), b.get("ufc_bouts"), "high"))
+
+    def form(prof):
+        rec = prof.get("recent") or []
+        if not rec:
+            return f'<div class="note">{esc(prof["name"])}: no UFCStats fight history found.</div>'
+        wl = "".join(h["result"] for h in rec)
+        items = "".join(
+            f'<div class="form-row"><span class="res {"w" if h["result"] == "W" else "l" if h["result"] == "L" else ""}">'
+            f'{esc(h["result"])}</span><span class="fo">vs {esc(h["opponent"] or "—")}</span>'
+            f'<span class="fm">{esc(h["method"] or "—")}{" R" + str(h["round"]) if h["round"] else ""}'
+            f'{" " + esc(h["time"]) if h.get("time") else ""}</span><span class="fd">{esc(h["date"])}</span></div>'
+            for h in rec)
+        return (f'<div class="form-h">{esc(prof["name"])} · last {len(rec)}: <b>{esc(wl)}</b> · '
+                f'{sum(h["result"] == "W" for h in rec)}-{sum(h["result"] == "L" for h in rec)}</div>{items}')
+
+    if not any([sa, sb, wa, wb, a.get("recent"), b.get("recent")]):
+        body = '<div class="note">No detailed stats for either fighter yet (UFC debuts or UFCStats unreachable).</div>'
+    else:
+        head = (f'<div class="tot bk"><div class="l"><b>{esc(_last(a["name"]))}</b></div><div class="m"></div>'
+                f'<div class="r"><b>{esc(_last(b["name"]))}</b></div></div>')
+        body = (head + sec("Striking efficiency") + f'<div class="tot bk">{strike}</div>'
+                + sec("Grappling & control") + f'<div class="tot bk">{grap}</div>'
+                + sec("Durability & finish rate") + f'<div class="tot bk">{fin}</div>'
+                + sec("Recent form (last 5 UFC bouts, newest first)") + form(a) + form(b)
+                + '<div class="pt-note">Strength of schedule: opponents are listed above; full opponent-quality '
+                  'ratings would need every opponent\'s page, so experience (UFC bouts) stands in.</div>')
+    return f'<details class="pdrawer"><summary>Data Backing &amp; Analytics</summary>{body}</details>'
 
 
 def render_ufc() -> None:
@@ -1144,6 +1264,10 @@ def load_card(card: dict) -> list[dict]:
     missing = sum(ufcstats.cached(n) is None for n in names)
     if missing:
         NOTES["ufcstats"] = f"UFCStats.com had no match for {missing} of {len(names)} fighters (debuts or unreachable)."
+    try:
+        ufc.ensure_moneylines(card)
+    except Exception as e:
+        NOTES["ufc odds"] = f"Moneyline fallback failed: {e}"
     with st.spinner("Projecting bouts…"):
         return compute_card(card["id"], bucket(), card)
 
@@ -1255,7 +1379,9 @@ def breakdown_fragment(bouts: list[dict]) -> None:
     H(f'<div class="card">{head}{bar}<div class="sub-h">Tale of the tape</div><div class="tot">{tot}</div></div>'
       f'<div class="card"><div class="sub-h" style="margin-top:0">Method of victory</div>'
       f'{mbars(a["name"], p, pred["methods_a"], "r")}{mbars(b["name"], 1 - p, pred["methods_b"], "b")}</div>'
-      f'<div class="card"><div class="sub-h" style="margin-top:0">Model factors (log-odds, + favors '
+      + (f'<div class="card"><div class="sub-h" style="margin-top:0">Round &amp; method props</div>'
+         f'{props_table(x)}</div>' if x.get("props") else "")
+      + f'<div class="card"><div class="sub-h" style="margin-top:0">Model factors (log-odds, + favors '
       f'{esc(_last(a["name"]))})</div>{factors}{mkt}<div class="factor"><span>Model only</span>'
       f'<span class="v">{esc(_last(a["name"]))} {pred["p_model"] * 100:.0f}%</span></div>{detail_note}{src_note}</div>'
       + (f'<div class="card"><div class="sub-h" style="margin-top:0">Latest news</div>{fnews}</div>' if fnews else ""))

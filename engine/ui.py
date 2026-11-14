@@ -74,6 +74,24 @@ text-transform:uppercase;letter-spacing:.05em}
 .pt.fg{background:rgba(34,197,94,.06)}
 .pt .sg{font-weight:800;color:var(--green)}
 .pt-note{color:var(--muted);font-size:.68rem;margin-top:6px}
+.ut{display:grid;grid-template-columns:1.05fr 1.5fr 1.5fr;gap:6px;padding:7px 8px;font-size:.74rem;align-items:center;
+border-top:1px solid var(--line);font-variant-numeric:tabular-nums}
+.ut>span{display:flex;align-items:center;gap:4px;flex-wrap:wrap}
+.ut small{color:var(--muted)}
+.ut .sg{font-weight:800;color:var(--green)}
+.ut.head{border-top:0;background:var(--card2);color:var(--muted);font-size:.62rem;font-weight:800;
+text-transform:uppercase;letter-spacing:.05em}
+.ut.sec{grid-template-columns:1fr;background:var(--card2);color:var(--muted);font-size:.62rem;font-weight:800;
+text-transform:uppercase;letter-spacing:.05em;padding:5px 8px}
+.ml-src{color:var(--amber);font-size:.68rem;margin:4px 0 0}
+.form-h{font-size:.76rem;margin:8px 0 4px;color:var(--text)}
+.form-row{display:grid;grid-template-columns:28px 1.4fr 1.2fr .9fr;gap:6px;font-size:.7rem;padding:4px 0;
+border-top:1px solid var(--line);align-items:center}
+.form-row span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.form-row .res{font-weight:800;text-align:center;border-radius:6px;background:var(--card2)}
+.form-row .res.w{color:var(--green);background:var(--green-bg)}
+.form-row .res.l{color:var(--red);background:var(--red-bg)}
+.form-row .fd{color:var(--muted);text-align:right}
 .verdict{display:flex;align-items:center;gap:8px;margin:10px 0 2px;padding:8px 10px;border-radius:12px;
 font-size:.8rem;line-height:1.35}
 .verdict.bet{background:rgba(34,197,94,.12);border:1px solid rgba(34,197,94,.45)}
@@ -177,6 +195,7 @@ margin:16px 4px 8px;display:flex;align-items:center;gap:8px}
 .tot .r{font-weight:700;font-size:.9rem}
 .tot .m{color:var(--muted);font-size:.62rem;text-transform:uppercase;letter-spacing:.07em;text-align:center}
 .tot .adv{color:var(--green)}
+.tot.bk{grid-template-columns:1fr 1.7fr 1fr}
 .mbar{display:flex;align-items:center;gap:8px;margin:5px 0}
 .mbar .lab{width:92px;font-size:.74rem;color:var(--muted)}
 .mbar .track{flex:1;height:8px;background:var(--card2);border-radius:999px;overflow:hidden}

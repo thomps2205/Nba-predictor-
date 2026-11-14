@@ -177,7 +177,24 @@ streamlit run app.py
   * **Fight Card** lists every bout from the main event down to the prelims, with records, odds, win
     probability, the pick and the predicted method (KO/TKO, Submission, Decision).
   * **Fight Breakdowns** shows a tale of the tape (age, height, reach, stance, striking and grappling rates),
-    method-of-victory bars, and the model factors.
+    method-of-victory bars, the round and method table, and the model factors.
+  * **Round & Method Props** drawer on every bout: the exact probability of each outcome for each fighter, with
+    fair American odds. Outcomes are KO/TKO/DQ, Submission and Decision, plus round moneylines for a finish in
+    Round 1 through Round 3 (or Round 5). It also shows goes-the-distance vs inside-the-distance and the decision
+    type (Unanimous / Split / Majority). Finishes are spread over the rounds using the fighter's own UFC stoppage
+    rounds blended with UFC-wide round rates. ESPN posts no method or round prices, so the market reference is
+    implied: the vig-free moneyline × weight-class outcome rates, plus a ~15% prop hold. A model edge of at
+    least 2 points over that reference is 🟢 BET; anything else is 🟡 PASS.
+  * **Data Backing & Analytics** drawer on every bout:
+    * Striking efficiency: SLpM, SApM, the differential, accuracy and defense.
+    * Grappling and control: TD/15, TD accuracy and defense, submission average.
+    * Durability and finish rate: share of wins by KO, submission and decision, the stoppage rate, UFC losses
+      by KO or submission, and UFC experience.
+    * Recent form: the last 5 UFC bouts with the result, opponent, method, round, time and date. These come
+      from UFCStats.com fight history.
+  * **Moneyline fallback:** if ESPN's scoreboard has no moneyline, the app uses the saved pregame or closing
+    line. If there is none, it tries ESPN's core per-bout odds feed. If that is empty too, it shows the
+    model's fair odds, labelled "model fair".
 
 ## Code layout
 
@@ -187,7 +204,8 @@ engine/common.py  throttled HTTP, disk cache, parsing helpers
 engine/espn.py    ESPN endpoints + tolerant parsers
 engine/teams.py   team ratings + per-sport game models (and optional nba_api ratings)
 engine/props.py   player prop models
-engine/ufc.py     fight cards, fighter profiles, win-probability and method model
+engine/ufc.py     fight cards, fighter profiles, win-probability and method model, moneyline fallback
+engine/ufc_props.py  round moneylines, method props, implied-market BET/PASS
 engine/ui.py      CSS + HTML helpers
 ```
 

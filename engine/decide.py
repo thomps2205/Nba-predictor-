@@ -319,7 +319,7 @@ def game_alt_ladders(lg_key: str, kind: str, g: dict, p: dict) -> dict:
 # --------------------------------------------------------------------------
 def fight_decision(name: str, p: float, ml: float | None, model_only: float) -> dict:
     if ml is None:
-        return verdict(False, "No moneyline posted", f"{name} to win", p)
+        return verdict(False, f"No sportsbook line found — model fair {american(p)}", f"{name} to win", p)
     be = 100 / (ml + 100) if ml > 0 else -ml / (-ml + 100)
     pp = p - be
     if pp >= PP_EDGE and p >= 0.35 and abs(model_only - p) < 0.25:

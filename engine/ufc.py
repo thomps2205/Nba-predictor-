@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from datetime import date, timedelta
 
-from .common import (cache_fresh, disk_cached, flatten_stats, http_json, inches, ml_to_prob, num, pick, to_et,
+from .common import (cache_fresh, cache_read, cache_write, disk_cached, flatten_stats, http_json, inches, ml_to_prob, num, pick, to_et,
                      to_et_date)
 from .espn import LEAGUES, WEB, scoreboard
 
@@ -175,6 +175,79 @@ def _fighter_ml(comp: dict, f: dict, order: int):
     return None
 
 
+TTL_ML_FALLBACK = 30 * 60
+
+
+def _core_bout_odds(event_id: str, comp_id: str) -> list[dict]:
+    raw = http_json(f"{CORE}/leagues/ufc/events/{event_id}/competitions/{comp_id}/odds", retries=1)
+    items = []
+    for it in (raw.get("items") or [])[:4]:
+        if isinstance(it, dict) and "$ref" in it and len(it) == 1:
+            try:
+                it = http_json(it["$ref"], retries=1)
+            except Exception:
+                continue
+        items.append(it)
+    return items
+
+
+def _ml_from_core(items: list[dict], fighters: list[dict]) -> tuple | None:
+    for it in items:
+        sides = {}
+        for side in ("homeAthleteOdds", "awayAthleteOdds", "homeTeamOdds", "awayTeamOdds"):
+            o = it.get(side)
+            if not isinstance(o, dict):
+                continue
+            ml = o.get("moneyLine")
+            if ml is None:
+                ml = ((o.get("current") or {}).get("moneyLine") or {}).get("american")
+            if ml in (None, "", "OFF", "EVEN"):
+                ml = 100 if ml == "EVEN" else None
+            if ml is None:
+                continue
+            ref = ((o.get("athlete") or o.get("team") or {}).get("$ref") or "")
+            aid = ref.rstrip("/").split("/")[-1].split("?")[0] if ref else ""
+            sides["home" if side.startswith("home") else "away"] = (aid, num(ml))
+        if len(sides) < 2:
+            continue
+        ids = [f["id"] for f in fighters]
+        by_id = {aid: ml for aid, ml in sides.values() if aid}
+        if all(i in by_id for i in ids):
+            return by_id[ids[0]], by_id[ids[1]]
+        return sides["home"][1], sides["away"][1]  # same home = first-listed convention as _fighter_ml
+    return None
+
+
+def ensure_moneylines(card: dict) -> None:
+    """Every bout gets actionable odds. Order: ESPN scoreboard (saved per bout as the closing line) ->
+    saved pregame line -> ESPN core competition odds -> model fair odds (flagged 'model fair', applied later)."""
+    for b in card["bouts"]:
+        fa, fb = b["fighters"]
+        key = f"ufcml|{card['id']}|{b['id']}"
+        if fa.get("ml") is not None and fb.get("ml") is not None:
+            b["ml_src"] = "ESPN"
+            if b["state"] == "pre":
+                cache_write(key, [fa["ml"], fb["ml"]])
+            continue
+        saved = cache_read(key)
+        if saved and len(saved) == 2 and None not in saved:
+            fa["ml"], fb["ml"] = saved
+            b["ml_src"] = "saved closing line" if b["state"] != "pre" else "saved line"
+            continue
+        try:
+            items = disk_cached(f"ufcmlcore|{card['id']}|{b['id']}", TTL_ML_FALLBACK,
+                                lambda: _core_bout_odds(card["id"], b["id"]))
+            got = _ml_from_core(items, b["fighters"])
+        except Exception:
+            got = None
+        if got:
+            fa["ml"], fb["ml"] = got
+            b["ml_src"] = "ESPN core odds"
+            cache_write(key, list(got))
+        else:
+            b["ml_src"] = "model fair"
+
+
 # --------------------------------------------------------------------------
 # Fighter profiles
 # --------------------------------------------------------------------------
@@ -292,6 +365,10 @@ def fighter_profile(fid: str, card_fighter: dict, ufcs: dict | None = None) -> d
     prof["ufcstats"] = False
     if ufcs:  # UFCStats.com: official career stats + win methods override ESPN; physicals fill gaps
         prof["ufcstats"] = True
+        prof["finish_rounds"] = list(ufcs.get("finish_rounds") or [])
+        prof["recent"] = list(ufcs.get("recent") or [])
+        prof["losses_by"] = dict(ufcs.get("losses_by") or {})
+        prof["ufc_bouts"] = ufcs.get("ufc_bouts")
         for k in ("height", "reach", "age"):
             if not prof[k] and ufcs.get(k):
                 prof[k] = ufcs[k]

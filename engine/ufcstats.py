@@ -18,7 +18,7 @@ DOWN_FLAG = "ufcstats_down.flag"
 
 
 def key(name: str) -> str:
-    return f"ufcstats|{norm_name(name)}"
+    return f"ufcstats2|{norm_name(name)}"  # v2: adds fight history (rounds, recent bouts)
 
 
 def is_cached(name: str) -> bool:
@@ -82,22 +82,46 @@ def _parse_details(html: str) -> dict:
         if v not in (None, "", "--"):
             out["stats"][k] = num(v)
     ko = sub = dec = 0
+    finish_rounds, history = [], []
+
+    def ptexts(td):
+        ps = [p.get_text(" ", strip=True) for p in td.find_all("p")]
+        return [x for x in ps if x] or [td.get_text(" ", strip=True)]
+
     for tr in soup.select("tr.b-fight-details__table-row"):
         tds = tr.find_all("td")
         if len(tds) < 8:
             continue
         result = tds[0].get_text(" ", strip=True).lower()
-        method = tds[7].get_text(" ", strip=True).upper()
+        if result.startswith("next") or not result:
+            continue
+        method_full = ptexts(tds[7])
+        method = (method_full[0] if method_full else "").upper()
+        rnd = int(num(tds[8].get_text(strip=True), 0)) if len(tds) > 8 else 0
+        names = ptexts(tds[1])
+        event = ptexts(tds[6]) if len(tds) > 6 else []
+        history.append({"result": result[:1].upper(), "method": method, "detail": method_full[1] if len(method_full) > 1 else "",
+                        "round": rnd, "time": tds[9].get_text(strip=True) if len(tds) > 9 else "",
+                        "opponent": names[1] if len(names) > 1 else "", "event": event[0] if event else "",
+                        "date": event[1] if len(event) > 1 else ""})
         if not result.startswith("win"):
             continue
-        if "KO" in method:
+        if "KO" in method or "DQ" in method:
             ko += 1
+            finish_rounds.append(rnd)
         elif "SUB" in method:
             sub += 1
+            finish_rounds.append(rnd)
         elif "DEC" in method:
             dec += 1
     if ko + sub + dec:
         out["methods"] = (ko, sub, dec)
+    out["finish_rounds"] = [r for r in finish_rounds if r > 0]
+    out["recent"] = history[:5]  # newest first on UFCStats
+    out["losses_by"] = {"KO": sum(1 for h in history if h["result"] == "L" and ("KO" in h["method"] or "DQ" in h["method"])),
+                        "SUB": sum(1 for h in history if h["result"] == "L" and "SUB" in h["method"]),
+                        "DEC": sum(1 for h in history if h["result"] == "L" and "DEC" in h["method"])}
+    out["ufc_bouts"] = len(history)
     return out
 
 
