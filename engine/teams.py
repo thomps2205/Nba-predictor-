@@ -87,6 +87,7 @@ def team_profile(lg: League, team_id: str, before: date) -> dict | None:
         "w": sum(g["pf"] > g["pa"] for g in games), "l": sum(g["pf"] < g["pa"] for g in games),
         "pace": None,
     }
+    prof.update(period_rates(lg, games))
     if lg.kind == "basketball":
         try:
             prof["pace"] = espn.team_possessions(espn.team_statistics(lg, team_id), prof["gp"])
@@ -133,6 +134,150 @@ def nba_api_ratings(season: str) -> dict[str, dict]:
 def _adv_lookup(adv: dict, display_name: str) -> dict | None:
     dn = display_name.lower()
     return next((v for k, v in adv.items() if dn.endswith(k)), None)
+
+
+# --------------------------------------------------------------------------
+# Period / half splits
+# --------------------------------------------------------------------------
+# Regulation periods per sport and league-typical scoring shares (fallback when a game has no linescores).
+DEFAULT_SHARES = {
+    "NBA": [0.252, 0.249, 0.251, 0.248], "NFL": [0.18, 0.31, 0.19, 0.32], "NCAAB": [0.48, 0.52],
+    "NHL": [0.31, 0.34, 0.35], "soccer": [0.44, 0.56],
+}
+TOTAL_SD = {"NBA": 17.0, "NCAAB": 15.0, "NFL": 13.0}
+PERIOD_GAMES = 15
+
+
+def _shares_key(lg: League) -> str:
+    return "soccer" if lg.kind == "soccer" else lg.key
+
+
+def period_rates(lg: League, games: list[dict]) -> dict:
+    """Average points/goals scored and allowed per regulation period over the last PERIOD_GAMES games, from ESPN
+    linescores; games without usable linescores fall back to league-typical shares of the final score."""
+    shares = DEFAULT_SHARES.get(_shares_key(lg))
+    if not shares or not games:
+        return {}
+    n = len(shares)
+    recent = games[-PERIOD_GAMES:]
+    pf_p, pa_p, real = [0.0] * n, [0.0] * n, 0
+    for g in recent:
+        lf, la = list(g.get("ls_for") or []), list(g.get("ls_against") or [])
+        if lg.kind == "soccer" and lf and la:  # 2nd half = full score - 1st half (drops extra time / pens)
+            lf = [lf[0], max(g["pf"] - lf[0], 0.0)]
+            la = [la[0], max(g["pa"] - la[0], 0.0)]
+        usable = len(lf) >= n and len(la) >= n and (
+            sum(lf[:n]) + sum(la[:n]) > 0 or lg.kind in ("hockey", "soccer"))  # 0-0 periods are real data
+        if usable:
+            lf, la = lf[:n], la[:n]
+            real += 1
+        else:
+            lf = [g["pf"] * x for x in shares]
+            la = [g["pa"] * x for x in shares]
+        for i in range(n):
+            pf_p[i] += lf[i]
+            pa_p[i] += la[i]
+    k = len(recent)
+    return {"per_for": [x / k for x in pf_p], "per_against": [x / k for x in pa_p],
+            "ls_real": real, "ls_games": k}
+
+
+def period_segments(lg: League) -> list[tuple[str, str, list[int] | None]]:
+    """(code, label, period indices); None = full game."""
+    if lg.key in ("NBA", "NFL"):
+        return [("FG", "Full Game", None), ("1H", "1st Half", [0, 1]), ("2H", "2nd Half", [2, 3]),
+                ("1Q", "1Q", [0]), ("2Q", "2Q", [1]), ("3Q", "3Q", [2]), ("4Q", "4Q", [3])]
+    if lg.key == "NHL":
+        return [("FG", "Full Game", None), ("1P", "1st Period", [0]), ("2P", "2nd Period", [1]),
+                ("3P", "3rd Period", [2])]
+    if lg.key == "NCAAB" or lg.kind == "soccer":
+        return [("FG", "Full Game", None), ("1H", "1st Half", [0]), ("2H", "2nd Half", [1])]
+    return [("FG", "Full Game", None)]
+
+
+def _american(p: float) -> str:
+    if p <= 0 or p >= 1:
+        return "—"
+    return f"-{100 * p / (1 - p):.0f}" if p >= 0.5 else f"+{100 * (1 - p) / p:.0f}"
+
+
+def _half_line(x: float) -> float:
+    return round(x - 0.5) + 0.5
+
+
+def period_projection(lg: League, proj: dict, ph: dict, pa_: dict, idx: list[int]) -> dict | None:
+    """Projection for a set of regulation periods. Splits the full-game projection by the home team's scoring
+    share and the away team's conceding share for those periods (and vice versa), then prices the segment:
+    normal margin/total for basketball & football (with push on a tie), independent Poisson per side (i.e.
+    bivariate Poisson with no correlation term) for hockey & soccer."""
+    if not proj or not ph or not pa_ or "per_for" not in ph or "per_for" not in pa_:
+        return None
+
+    league = DEFAULT_SHARES.get(_shares_key(lg), [])
+    base_share = sum(league[i] for i in idx) if league else len(idx) / max(len(ph["per_for"]), 1)
+
+    def share(vals, games):
+        tot = sum(vals)
+        team = sum(vals[i] for i in idx) / tot if tot > 0 else base_share
+        w = games / (games + 5)  # small samples lean on league-typical splits
+        return w * team + (1 - w) * base_share
+
+    gh, ga = ph.get("ls_games", 0), pa_.get("ls_games", 0)
+    sh_h = 0.5 * share(ph["per_for"], gh) + 0.5 * share(pa_["per_against"], ga)
+    sh_a = 0.5 * share(pa_["per_for"], ga) + 0.5 * share(ph["per_against"], gh)
+    lh, la = proj["pts_home"] * sh_h, proj["pts_away"] * sh_a
+    out = {"pts_home": lh, "pts_away": la, "total": lh + la, "spread_home": -(lh - la),
+           "real": min(ph.get("ls_real", 0), pa_.get("ls_real", 0)), "games": min(ph.get("ls_games", 0),
+                                                                                   pa_.get("ls_games", 0))}
+    if lg.kind in ("hockey", "soccer"):
+        p_h = p_d = p_a = btts = 0.0
+        tot = {}
+        for i in range(10):
+            for j in range(10):
+                p = _poisson(i, max(lh, 0.01)) * _poisson(j, max(la, 0.01))
+                if i > j:
+                    p_h += p
+                elif i == j:
+                    p_d += p
+                else:
+                    p_a += p
+                if i and j:
+                    btts += p
+                tot[i + j] = tot.get(i + j, 0.0) + p
+        z = p_h + p_d + p_a
+        out.update(home_win=p_h / z, draw=p_d / z, away_win=p_a / z, btts=btts / z, three_way=True,
+                   over={line: sum(v for k, v in tot.items() if k > line) / z for line in (0.5, 1.5, 2.5)})
+        out["total_line"] = 0.5 if out["total"] < 1.0 else 1.5 if out["total"] < 2.2 else 2.5
+        out["p_over"] = out["over"][out["total_line"]]
+    else:
+        frac = max(0.5 * (sh_h + sh_a), 0.05)
+        sd_m = cfg(lg.key)["sigma"] * math.sqrt(frac)
+        sd_t = TOTAL_SD.get(lg.key, 13.0) * math.sqrt(frac)
+        mu = lh - la
+        p_h = 1 - norm_cdf((0.5 - mu) / sd_m)
+        p_a = norm_cdf((-0.5 - mu) / sd_m)
+        out.update(home_win=p_h, away_win=p_a, draw=max(0.0, 1 - p_h - p_a), three_way=False)
+        out["total_line"] = _half_line(out["total"])
+        out["p_over"] = 1 - norm_cdf((out["total_line"] - out["total"]) / sd_t)
+    two = out["home_win"] / max(out["home_win"] + out["away_win"], 1e-9)  # push / draw refunded
+    out["fair_home"], out["fair_away"] = _american(two), _american(1 - two)
+    out["fair_home_3w"] = _american(out["home_win"]) if out["three_way"] else out["fair_home"]
+    out["fair_away_3w"] = _american(out["away_win"]) if out["three_way"] else out["fair_away"]
+    out["fair_draw"] = _american(out["draw"]) if out["three_way"] else ""
+    out["spread_line"] = _half_line(abs(lh - la)) if abs(lh - la) >= 0.25 else 0.0
+    return out
+
+
+def full_as_segment(lg: League, proj: dict) -> dict:
+    """Full-game projection in the same shape as period_projection (for the breakdown drawer)."""
+    three = lg.kind == "soccer"
+    out = {"pts_home": proj["pts_home"], "pts_away": proj["pts_away"], "total": proj["total"],
+           "spread_home": proj["spread_home"], "three_way": three}
+    if three:
+        out.update(home_win=proj["home_win_prob"], draw=proj["draw_prob"], away_win=proj["away_win_prob"])
+    else:
+        out.update(home_win=proj["home_win_prob"], draw=0.0, away_win=1 - proj["home_win_prob"])
+    return out
 
 
 def league_baseline(key: str, profiles: dict[str, dict]) -> dict:

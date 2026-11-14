@@ -316,6 +316,17 @@ def schedule_key(lg: League, team_id: str) -> str:
     return f"schedule|{lg.key}|{team_id}"
 
 
+def _linescores(c: dict) -> list[float]:
+    """Points / goals per period from competitors[].linescores ([{"value": 28.0}, ...])."""
+    out = []
+    for x in c.get("linescores") or []:
+        if isinstance(x, dict):
+            out.append(num(x.get("value", x.get("displayValue"))))
+        else:
+            out.append(num(x))
+    return out
+
+
 def parse_completed_games(raw: dict, team_id: str, before: date) -> list[dict]:
     """Completed regular/post-season games before `before`, oldest first."""
     out = []
@@ -340,7 +351,8 @@ def parse_completed_games(raw: dict, team_id: str, before: date) -> list[dict]:
             if pf <= 0 and pa <= 0:
                 continue
             out.append({"date": d, "pf": pf, "pa": pa, "home": me.get("homeAway") == "home",
-                        "opp": str(op.get("id") or (op.get("team") or {}).get("id"))})
+                        "opp": str(op.get("id") or (op.get("team") or {}).get("id")),
+                        "ls_for": _linescores(me), "ls_against": _linescores(op)})
         except Exception:
             continue
     out.sort(key=lambda g: g["date"])

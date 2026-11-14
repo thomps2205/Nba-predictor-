@@ -44,6 +44,21 @@ letter-spacing:.03em;text-transform:uppercase;white-space:nowrap}
 .pill.ok{background:var(--green-bg);color:var(--green)}
 .pill.info{background:var(--blue-bg);color:var(--blue)}
 .pill.comp{background:var(--card2);color:var(--text);border:1px solid var(--line);text-transform:none;letter-spacing:0}
+.pdrawer{margin-top:12px;border-top:1px solid var(--line);padding-top:8px}
+.pdrawer summary{cursor:pointer;list-style:none;font-size:.8rem;font-weight:800;color:var(--text);padding:4px 0;
+display:flex;align-items:center;gap:6px}
+.pdrawer summary::-webkit-details-marker{display:none}
+.pdrawer summary:before{content:"▸";color:var(--green);transition:transform .15s}
+.pdrawer[open] summary:before{transform:rotate(90deg)}
+.ptab{margin-top:6px;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.pt{display:grid;grid-template-columns:34px 1fr 1fr 1.35fr 1fr 1.35fr;gap:4px;padding:7px 8px;font-size:.76rem;
+align-items:center;border-top:1px solid var(--line);font-variant-numeric:tabular-nums}
+.pt span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pt.head{border-top:0;background:var(--card2);color:var(--muted);font-size:.62rem;font-weight:800;
+text-transform:uppercase;letter-spacing:.05em}
+.pt.fg{background:rgba(34,197,94,.06)}
+.pt .sg{font-weight:800;color:var(--green)}
+.pt-note{color:var(--muted);font-size:.68rem;margin-top:6px}
 .region-h{color:var(--muted);font-size:.68rem;font-weight:800;letter-spacing:.09em;text-transform:uppercase;margin:10px 2px 4px}
 .trow{display:flex;align-items:center;gap:10px;padding:6px 0}
 .logo{width:34px;height:34px;object-fit:contain;flex:none}

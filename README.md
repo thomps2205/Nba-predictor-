@@ -99,6 +99,24 @@ streamlit run app.py
     (`soccer/all/teams/{id}/schedule`). It then tries the club's domestic leagues, or other international
     competitions for national teams.
   * **Parlays:** soccer legs appear in the Parlays tab and in MIX.
+* **Period markets:** a pill bar above the matchup cards switches between periods:
+  * NBA & NFL: Full Game, 1st Half, 2nd Half, 1Q to 4Q.
+  * NCAAB & Soccer: Full Game, 1st Half, 2nd Half.
+  * NHL: Full Game, 1st, 2nd and 3rd Period.
+
+  How the period numbers are built:
+  * **Data:** splits come from each team's real period scores (ESPN `competitors[].linescores`) over its last
+    15 games. Soccer's 2nd half is the full score minus the 1st half. Games without period scores use
+    league-typical splits. Team splits are blended toward league splits on small samples.
+  * **Projection:** the full-game projection is split by the team's scoring share and the opponent's conceding
+    share for that segment.
+  * **Output:** each segment shows projected score, moneyline (win % and fair odds, with push or draw %),
+    spread and total.
+  * **Pricing:** NBA/NCAAB/NFL use a normal margin and total scaled to the segment length. NHL periods and
+    soccer halves use an independent Poisson per side, giving a 3-way result, O/U 0.5 / 1.5 and (soccer)
+    both teams to score.
+  * **Breakdown drawer:** every matchup card has a collapsible "Period & Half Breakdown" with all segments
+    at a glance. These are model prices only, since ESPN doesn't publish period odds.
 * **Injuries** (NBA, NFL, NHL) shows ESPN's report for every team on the slate.
 * **UFC:**
   * **Fight Card** lists every bout from the main event down to the prelims, with records, odds, win

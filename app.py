@@ -262,6 +262,159 @@ def matchup_card(g: dict, p: dict | None, b2b: set[str], kind: str, badge: str =
     return body + f'<div class="mkts">{box1}{box2}{box3}</div></div>'
 
 
+# --------------------------------------------------------------------------
+# Period / half markets
+# --------------------------------------------------------------------------
+def _pct(x: float) -> str:
+    return f"{x * 100:.0f}%"
+
+
+def period_drawer(lg_: League, g: dict, p: dict | None, ph: dict | None, pa_: dict | None) -> str:
+    """Collapsible table: every period / half at a glance (projected score, spread, total, win %)."""
+    if not p or not ph or not pa_ or "per_for" not in ph or "per_for" not in pa_:
+        return ""
+    segs = teams.period_segments(lg_)
+    if len(segs) < 2:
+        return ""
+    h, a = g["home"]["abbr"], g["away"]["abbr"]
+    goals = lg_.kind in ("hockey", "soccer")
+    d = 2 if goals else 1
+    rows = []
+    for code, label, idx in segs:
+        q = teams.full_as_segment(lg_, p) if idx is None else teams.period_projection(lg_, p, ph, pa_, idx)
+        if not q:
+            continue
+        margin = q["pts_home"] - q["pts_away"]
+        fav = h if margin >= 0 else a
+        spread = "PK" if abs(margin) < 0.25 else f"{fav} -{abs(margin):.{d}f}"
+        if q.get("three_way"):
+            win = f'{_pct(q["home_win"])} · D {_pct(q["draw"])}'
+        else:
+            wh = q["home_win"] / max(q["home_win"] + q["away_win"], 1e-9)
+            win = f"{h if wh >= .5 else a} {_pct(max(wh, 1 - wh))}"
+        rows.append(f'<div class="pt{" fg" if idx is None else ""}"><span class="sg">{esc(code)}</span>'
+                    f'<span>{q["pts_away"]:.{d}f}</span><span>{q["pts_home"]:.{d}f}</span>'
+                    f'<span>{esc(spread)}</span><span>{q["total"]:.{d}f}</span><span>{esc(win)}</span></div>')
+    real = min(ph.get("ls_real", 0), pa_.get("ls_real", 0))
+    n = min(ph.get("ls_games", 0), pa_.get("ls_games", 0))
+    src = (f"Splits from {real} of the last {n} games with ESPN period scores"
+           + ("; the rest use league-typical splits." if real < n else "."))
+    win_head = f"{h} win · draw" if lg_.kind in ("hockey", "soccer") else "Win"
+    return (f'<details class="pdrawer"><summary>Period &amp; Half Breakdown</summary><div class="ptab">'
+            f'<div class="pt head"><span></span><span>{esc(a)}</span><span>{esc(h)}</span><span>Spread</span>'
+            f'<span>Total</span><span>{esc(win_head)}</span></div>{"".join(rows)}</div>'
+            f'<div class="pt-note">{esc(src)}</div></details>')
+
+
+def period_card(g: dict, q: dict, code: str, label: str, kind: str, badge: str = "") -> str:
+    """Matchup card for one period / half: projected score, moneyline (with draw/push), spread, total."""
+    h, a = g["home"], g["away"]
+    goals = kind in ("hockey", "soccer")
+    d = 2 if goals else 1
+    tags = f'<span class="pill comp">{esc(badge)}</span>' if badge else ""
+    tags += f'<span class="pill info">{esc(label)}</span>'
+    tip = g["tip"].strftime("%a %-I:%M %p ET") if g["tip"] is not None else ""
+
+    def trow(t, pts):
+        return (f'<div class="trow">{logo_html(t["logo"], t["abbr"])}<div class="tinfo"><div class="tabbr">'
+                f'{esc(t["abbr"])}<span class="rec">{esc(t["record"] or "")}</span></div>'
+                f'<div class="tname">{esc(t["short"] or t["name"])}</div></div>'
+                f'<div class="tproj"><span class="lbl">Proj {esc(code)}</span><span class="num">{pts:.{d}f}</span></div></div>')
+
+    ph, pd_, pa = q["home_win"], q["draw"], q["away_win"]
+    top = max(ph, pd_, pa) if q["three_way"] else max(ph, pa)
+    if q["three_way"]:
+        bar = (f'<div class="winbar"><div class="a{" fav" if pa == top else ""}" style="width:{pa * 100:.0f}%"></div>'
+               f'<div class="d{" fav" if pd_ == top else ""}" style="width:{pd_ * 100:.0f}%"></div>'
+               f'<div class="h{" fav" if ph == top else ""}" style="width:{ph * 100:.0f}%"></div></div>'
+               f'<div class="winlbl"><span>{esc(a["abbr"])} {_pct(pa)}</span><span>Draw {_pct(pd_)}</span>'
+               f'<span>{esc(h["abbr"])} {_pct(ph)}</span></div>')
+    else:
+        bar = (f'<div class="winbar"><div class="a{" fav" if pa == top else ""}" style="width:{pa * 100:.0f}%"></div>'
+               f'<div class="d" style="width:{pd_ * 100:.0f}%"></div>'
+               f'<div class="h{" fav" if ph == top else ""}" style="width:{ph * 100:.0f}%"></div></div>'
+               f'<div class="winlbl"><span>{esc(a["abbr"])} {_pct(pa)}</span><span>Push {pd_ * 100:.1f}%</span>'
+               f'<span>{esc(h["abbr"])} {_pct(ph)}</span></div>')
+    if q["three_way"]:
+        best = max((("home", ph, h["abbr"], q["fair_home_3w"]), ("draw", pd_, "Draw", q["fair_draw"]),
+                    ("away", pa, a["abbr"], q["fair_away_3w"])), key=lambda x: x[1])
+        ml = (f'<div class="mkt"><span class="lbl">{esc(code)} 3-way</span><div class="val">{esc(best[2])} '
+              f'{_pct(best[1])}</div><div class="sub">Fair {esc(best[3])}</div>'
+              f'<span class="badge muted">D {esc(q["fair_draw"])}</span></div>')
+    else:
+        home_fav = ph >= pa
+        fav, fair, p2 = (h, q["fair_home"], ph) if home_fav else (a, q["fair_away"], pa)
+        ml = (f'<div class="mkt"><span class="lbl">{esc(code)} Moneyline</span><div class="val">{esc(fav["abbr"])} '
+              f'{_pct(p2)}</div><div class="sub">Fair {esc(fair)}</div>'
+              f'<span class="badge muted">Push {pd_ * 100:.1f}%</span></div>')
+    margin = q["pts_home"] - q["pts_away"]
+    fav_t = h if margin >= 0 else a
+    if goals:
+        box2 = (f'<div class="mkt"><span class="lbl">{esc(code)} Goals</span><div class="val">{q["total"]:.2f}</div>'
+                f'<div class="sub">O0.5 {_pct(q["over"][0.5])} · O1.5 {_pct(q["over"][1.5])}</div>'
+                f'<span class="badge muted">MODEL</span></div>')
+        if kind == "soccer":
+            box3 = (f'<div class="mkt"><span class="lbl">{esc(code)} BTTS</span><div class="val">Yes {_pct(q["btts"])}'
+                    f'</div><div class="sub">Both teams score</div><span class="badge muted">MODEL</span></div>')
+        else:
+            box3 = (f'<div class="mkt"><span class="lbl">{esc(code)} Total</span><div class="val">O/U {q["total_line"]:g}'
+                    f'</div><div class="sub">Over {_pct(q["p_over"])}</div><span class="badge muted">MODEL</span></div>')
+        boxes = ml + box2 + box3
+    else:
+        sp = "PK" if q["spread_line"] == 0 else f'{fav_t["abbr"]} -{q["spread_line"]:g}'
+        box2 = (f'<div class="mkt"><span class="lbl">{esc(code)} Spread</span><div class="val">{esc(sp)}</div>'
+                f'<div class="sub">Margin {abs(margin):.1f}</div><span class="badge muted">MODEL</span></div>')
+        box3 = (f'<div class="mkt"><span class="lbl">{esc(code)} Total</span><div class="val">O/U {q["total_line"]:g}'
+                f'</div><div class="sub">Proj {q["total"]:.1f} · Over {_pct(q["p_over"])}</div>'
+                f'<span class="badge muted">MODEL</span></div>')
+        boxes = ml + box2 + box3
+    return (f'<div class="card"><div class="ghead"><div class="gtime">{esc(tip)}</div><div class="tags">{tags}</div></div>'
+            + trow(a, q["pts_away"]) + trow(h, q["pts_home"]) + bar + f'<div class="mkts">{boxes}</div></div>')
+
+
+@st.fragment
+def matchups_fragment(games: list[dict], slate_for, b2b: set, kind: str, soccer: bool = False) -> None:
+    """Market period pill bar + matchup cards (each with a Period & Half Breakdown drawer)."""
+    if not games:
+        return
+    segs = teams.period_segments(LEAGUES[games[0].get("league", sport)])
+    labels = {c: l for c, l, _ in segs}
+    idx_of = {c: i for c, _, i in segs}
+    code = "FG"
+    if len(segs) > 1:
+        code = st.segmented_control("Market period", list(labels), default="FG", key=f"period_{sport}",
+                                    format_func=labels.get, label_visibility="collapsed", width="stretch") or "FG"
+    if code != "FG":
+        note(f"{labels[code]} markets: each team's real scoring and conceding splits for that segment (ESPN period "
+             "scores, last 15 games) applied to the full-game projection. Model prices only — ESPN doesn't list "
+             "period odds.")
+    html, cur = [], None
+    for g in games:
+        lk = g.get("league", sport)
+        lg_ = LEAGUES[lk]
+        sl = slate_for(g)
+        if soccer and lk != cur:
+            cur = lk
+            kind_tag = {"cup": "Cup", "intl": "International"}.get(espn.SOCCER_TYPE.get(lk, ""), "")
+            html.append(f'<div class="seg-head">{league_logo_html(lk, 22)} {esc(lg_.label)}'
+                        + (f' <span class="pill info">{kind_tag}</span>' if kind_tag else "") + "</div>")
+        p = sl["projections"].get(g["id"])
+        ph, pa_ = sl["profiles"].get(g["home"]["id"]), sl["profiles"].get(g["away"]["id"])
+        badge = lg_.label if soccer else ""
+        card = None
+        if code != "FG" and p:
+            q = teams.period_projection(lg_, p, ph, pa_, idx_of[code])
+            if q:
+                card = period_card(g, q, code, labels[code], kind, badge)
+        if card is None:
+            card = matchup_card(g, p, b2b, kind, badge=badge)
+        drawer = period_drawer(lg_, g, p, ph, pa_)
+        if drawer and card.endswith("</div>"):
+            card = card[:-6] + drawer + "</div>"
+        html.append(card)
+    H("".join(html))
+
+
 def soccer_markets(g: dict, p: dict) -> str:
     """Three-way bar (away / draw / home) + Result, Total goals and Both-teams-score boxes."""
     h, a, o = g["home"], g["away"], g["odds"]
@@ -378,16 +531,7 @@ def render_soccer() -> None:
         note("Poisson goal model from each team's goals for/against (season + last 5, home edge). Cup ties and "
              "national teams with little history in that competition borrow the team's recent results from other "
              "competitions. Bar = away · draw · home; badges compare with ESPN's three-way odds and goal total.")
-        html, cur = [], None
-        for g in games:
-            if g["league"] != cur:
-                cur = g["league"]
-                kind_tag = {"cup": "Cup", "intl": "International"}.get(espn.SOCCER_TYPE.get(cur, ""), "")
-                html.append(f'<div class="seg-head">{league_logo_html(cur, 22)} {esc(LEAGUES[cur].label)}'
-                            + (f' <span class="pill info">{kind_tag}</span>' if kind_tag else "") + "</div>")
-            html.append(matchup_card(g, slates[cur]["projections"].get(g["id"]), set(), "soccer",
-                                     badge=LEAGUES[cur].label))
-        H("".join(html))
+        matchups_fragment(games, lambda g: slates[g["league"]], set(), "soccer", soccer=True)
     with tab_p:
         legs = []
         for k, sl in slates.items():
@@ -537,7 +681,7 @@ def render_team_sport() -> None:
     with tabs[0]:
         note("Model line vs. market. Spread/ML badges name the side the model likes; total badges show the "
              "over/under lean. Number = edge in points (win-probability points for ML).")
-        H("".join(matchup_card(g, projections.get(g["id"]), b2b, lg.kind) for g in games))
+        matchups_fragment(games, lambda g: slate, b2b, lg.kind)
     with tabs[1]:
         props_fragment(games, slate, inj)
     with tabs[2]:
