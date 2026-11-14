@@ -194,6 +194,18 @@ def cached_lines(lg_key: str, tick: int) -> dict:
     return linesmod.book_lines(LEAGUES[lg_key])
 
 
+def _odds_api_key() -> str:
+    try:
+        return str(st.secrets.get("ODDS_API_KEY", "") or os.environ.get("ODDS_API_KEY", ""))
+    except Exception:
+        return os.environ.get("ODDS_API_KEY", "")
+
+
+@st.cache_data(ttl=1800, show_spinner=False, max_entries=64)
+def cached_odds_api(lg_key: str, home_name: str, away_name: str, tick: int) -> dict:
+    return linesmod.odds_api_props(LEAGUES[lg_key], home_name, away_name, None, _odds_api_key())
+
+
 @st.cache_data(ttl=300, show_spinner=False, max_entries=64)
 def cached_espn_props(lg_key: str, game_id: str, tick: int) -> dict:
     return linesmod.espn_props(LEAGUES[lg_key], game_id)
@@ -633,19 +645,22 @@ def prop_line_info(r: dict, m: str, label: str, kind: str, book: tuple | None, t
     over_p = book[2] if book and len(book) > 2 else None
     under_p = book[3] if book and len(book) > 3 else None
     season = next((s_[1] for s_ in (r.get("SPL") or {}).get(m, []) if s_[0] == "Season average"), None)
+    implied = decide.implied_prop_line(kind, m, hist, r.get(f"OF_{m}", 1.0))
     if book:
         main, src, posted = book[0], book[1], True
-    elif season is not None and len(hist) >= 5:  # no sportsbook line: season average as the reference line
-        main, src, posted = (0.5 if (kind, m) in parlays.COUNT_LINE else round(season - 0.5) + 0.5), \
-            "Est. line (season avg)", False
+    elif implied is not None:  # no sportsbook / DFS line: implied consensus line (L5/L10 x opponent defense)
+        main, src, posted = implied, "Implied line", False
     else:
-        est = parlays._proxy_line(kind, m, hist)
-        main, src, posted = (est, "Est. line", False) if est is not None else (r[f"L_{m}"], "Model line", False)
+        main, src, posted = r[f"L_{m}"], "Model line", False
     ladder = decide.prop_alt_ladder(kind, m, proj, hist, main)
     line = decide.shift_line(kind, m, main, tier)
-    if line == main and posted:
+    if line == main and (posted or implied is not None):
         v = decide.prop_decision(kind, m, label, proj, line, hist, posted, r.get("Class", "ACTIVE"), over_p, under_p)
         shown = src if over_p is None else f"{src} {'O' if proj > line else 'U'} {(over_p if proj > line else under_p) or 0:+.0f}"
+        if not posted:
+            of = r.get(f"OF_{m}", 1.0)
+            v["reason"] += (f" · line = L5/L10 avg × opp defense {of:.2f}" if abs(of - 1) > 0.005
+                            else " · line = L5/L10 avg")
     elif line == main:
         v = decide.no_line_verdict(kind, m, label, proj, line, hist, season)
         shown = src
@@ -829,8 +844,11 @@ def props_fragment(games: list[dict], slate: dict, inj: list[dict]) -> None:
 
     df = compute_props(lg.key, gid, float(q_sit), bucket(), g, slate["projections"][gid], slate["profiles"],
                        slate["base"], slate["b2b"], inj)
+    all_players = df[["Id", "Player", "Team"]].to_dict("records") if not df.empty else []
     with st.spinner("Checking sportsbook lines and news…"):
-        book = {**cached_lines(lg.key, bucket(5)), **cached_espn_props(lg.key, gid, bucket(5))}
+        book = {**cached_lines(lg.key, bucket(5)), **cached_odds_api(lg.key, g["home"]["name"], g["away"]["name"],
+                                                                      bucket(30)),
+                **cached_espn_props(lg.key, gid, bucket(5))}
         arts = cached_news(lg.key, (g["away"]["id"], g["home"]["id"]), bucket(5))
     markets = propmod.MARKETS[kind]
     mlabels = dict(markets)
@@ -849,13 +867,13 @@ def props_fragment(games: list[dict], slate: dict, inj: list[dict]) -> None:
     if up_only and tier < 0:  # goals / assists / points ladders start at 0.5
         note(f"{mlabels[m]} lines start at 0.5, so only the + alt tiers apply — showing the main line.")
         tier = 0
-    n_espn = sum(1 for k in book if k[1] == m and str(k[0]).startswith("id:"))
     n_book = sum(1 for k in book if k[1] == m)
-    note((f"Lines: {n_book} {mlabels[m]} lines found ({n_espn} from ESPN's sportsbook feed with prices, the rest "
-          "from PrizePicks / Underdog). " if n_book else
-          "No sportsbook lines found for this game yet (ESPN, PrizePicks and Underdog). ")
-         + "🟢 BET / 🟡 PASS are judged against a real line and its price. ⚪ NO LINE = no sportsbook line: the "
-           "card shows the model's lean against the player's season average instead.")
+    note((f"{n_book} real {mlabels[m]} lines found (ESPN sportsbook feed, The Odds API, PrizePicks / Underdog). "
+          if n_book else "No sportsbook or DFS lines posted for this game yet. ")
+         + "Players without one get an implied line: last-5 / last-10 average × the opponent's defense for that "
+           "stat, rounded to .5. Every card is judged 🟢 BET / 🟡 PASS on projection vs. line"
+         + ("" if _odds_api_key() else " · add an ODDS_API_KEY in Streamlit secrets for real sportsbook lines")
+         + ".")
     if df.empty:
         empty_card("No players with recent game logs for this matchup yet.")
         return
@@ -874,18 +892,24 @@ def props_fragment(games: list[dict], slate: dict, inj: list[dict]) -> None:
     # BET cards first, then posted lines, then biggest edges
     for r in recs:
         r["_conf"] = report.confidence(r, m, r["_info"])
-    rank = {"BET": 0, "NO LINE": 1, "PASS": 2}
+    rank = {"BET": 0, "PASS": 1, "NO LINE": 2}
     recs.sort(key=lambda r: (rank.get(r["_info"]["verdict"]["verdict"], 3),
                              not r["_info"]["verdict"].get("lean", True), -r["_conf"], -r["_e"]))
     cnt = {k: sum(r["_info"]["verdict"]["verdict"] == k for r in recs) for k in rank}
-    H(f'<div class="note"><b>{cnt["BET"]}</b> BET · <b>{cnt["PASS"]}</b> PASS · <b>{cnt["NO LINE"]}</b> no line '
-      f'on {esc(mlabels[m])}'
+    H(f'<div class="note"><b>{cnt["BET"]}</b> BET · <b>{cnt["PASS"]}</b> PASS'
+      + (f' · <b>{cnt["NO LINE"]}</b> too few games' if cnt["NO LINE"] else "") + f' on {esc(mlabels[m])}'
       + (f" at {esc(tier_lbl[tier])}" if tier else "") + " · tap a player below for the full report</div>")
     H('<div class="pklist">' + "".join(report.pick_row(r, m, mlabels[m], r["_info"], r["_conf"]) for r in recs)
       + "</div>")
     by_id = {r["Id"]: r for r in recs}
-    pid = st.selectbox("Player report", list(by_id), key=f"rep_{sport}_{gid}", label_visibility="collapsed",
-                       format_func=lambda i: f'📋  {by_id[i]["Player"]} · {by_id[i]["Team"]}')
+    names = {x["Id"]: f'{x["Player"]} · {x["Team"]}' for x in all_players}  # stable across markets / filters
+    order = list(by_id) + [i for i in names if i not in by_id]
+    pid = st.selectbox("Player report", order, key=f"rep_{sport}_{gid}", label_visibility="collapsed",
+                       format_func=lambda i: f"📋  {names.get(i, i)}")
+    if pid not in by_id:
+        empty_card(f"No {mlabels[m]} line for {names.get(pid, 'this player')}.",
+                   "Pick another player or switch markets.")
+        return
     r = by_id[pid]
     H(report.report(SPORT_NAME.get(sport, sport), r, m, mlabels[m], kind, r["_info"], r["_conf"],
                     verdict_html(r["_info"]["verdict"]), alt_drawer(r["_info"], mlabels[m]),

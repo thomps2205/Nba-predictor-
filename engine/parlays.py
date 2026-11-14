@@ -195,10 +195,12 @@ def prop_legs(sport: str, kind: str, game: dict, df, book: dict, norm_name, labe
                 if len(b) > 3:
                     price = (b[2], b[3])
             else:
-                line = _proxy_line(kind, m, r.get(f"V10_{m}") or [])
+                from .decide import implied_prop_line
+                line = _proxy_line(kind, m, r.get(f"V10_{m}") or []) and implied_prop_line(
+                    kind, m, r.get(f"V10_{m}") or [], r.get(f"OF_{m}", 1.0))
                 if line is None:
                     continue
-                src_txt = "L10-avg line"
+                src_txt = "implied line"
             proj = r[f"P_{m}"]
             if (kind, m) in COUNT_MARKETS:
                 p_over = 1 - _poisson_cdf(int(math.floor(line)), max(proj, 0.01))

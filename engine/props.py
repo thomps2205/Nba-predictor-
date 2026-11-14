@@ -230,6 +230,11 @@ def _basketball(lg, players, tp, op, base, proj, is_b2b, q_sit, common) -> list[
              "AST": rate["AST"] * pm * pace_f * usg["AST"]}
         row = _base_row(lg, a, status, cls, common)
         row["Info"] = f"{pm:.0f} min proj"
+        # opponent defense factor per market (implied market line); ESPN has no REB/AST allowed -> neutral
+        avg = {k: float(np.mean([r[k] for r in l10])) for k in ("PTS", "REB", "AST")}
+        tot = sum(avg.values()) or 1.0
+        row.update(OF_PTS=pts_f, OF_REB=1.0, OF_AST=1.0,
+                   OF_PRA=(avg["PTS"] * pts_f + avg["REB"] + avg["AST"]) / tot, OppDef=f"{(pts_f - 1) * 100:+.0f}%")
         for k in ("PTS", "REB", "AST"):
             _market_fields(row, k, p[k], [r[k] for r in l10])
         _market_fields(row, "PRA", p["PTS"] + p["REB"] + p["AST"], [r["PTS"] + r["REB"] + r["AST"] for r in l10])
@@ -249,6 +254,8 @@ def _football(lg, players, op, base, team_pts, common) -> list[dict]:
             continue
         row = _base_row(lg, a, status, cls, common)
         row["Info"] = f"{a['pos']} · {len(l8)} recent games"
+        row.update(OF_PASS=opp_f, OF_RUSH=opp_f, OF_REC=opp_f, OF_RECS=opp_f ** 0.5,
+                   OppDef=f"{(opp_f ** 2 - 1) * 100:+.0f}%")
         mult = {"PASS": opp_f * game_f, "REC": opp_f * game_f, "RECS": opp_f ** 0.5 * game_f,
                 "RUSH": opp_f * game_f ** 0.5}
         for k in ("PASS", "RUSH", "REC", "RECS"):
@@ -273,6 +280,7 @@ def _hockey(lg, players, op, base, is_b2b, common) -> list[dict]:
         row = _base_row(lg, a, status, cls, common)
         toi = float(np.mean([r["TOI"] for r in l10])) if l10 else 0.0
         row["Info"] = f"{int(toi)}:{int((toi % 1) * 60):02d} TOI" if toi else f"{len(l10)} recent games"
+        row.update(OF_G=opp_f, OF_A=opp_f, OF_PTS=opp_f, OF_SOG=opp_f ** 0.5, OppDef=f"{(opp_f - 1) * 100:+.0f}%")
         g = _wavg([r["G"] for r in l10]) * opp_f * fat
         ast = _wavg([r["A"] for r in l10]) * opp_f * fat
         sog = _wavg([r["SOG"] for r in l10]) * opp_f ** 0.5 * fat

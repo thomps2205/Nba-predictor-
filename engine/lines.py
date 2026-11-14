@@ -191,3 +191,61 @@ def espn_props(lg: League, event_id: str) -> dict:
 def lookup(book: dict, athlete_id: str, name: str, m: str):
     """Line for a player/market: ESPN (by athlete id, with prices) first, then PrizePicks / Underdog by name."""
     return book.get((f"id:{athlete_id}", m)) or book.get((norm_name(name), m))
+
+
+# --------------------------------------------------------------------------
+# The Odds API (optional; free key at the-odds-api.com, set ODDS_API_KEY in Streamlit secrets)
+# --------------------------------------------------------------------------
+ODDS_API = "https://api.the-odds-api.com/v4/sports"
+ODDS_SPORT = {"NBA": "basketball_nba", "NCAAB": "basketball_ncaab", "NFL": "americanfootball_nfl",
+              "NHL": "icehockey_nhl"}
+ODDS_MARKETS = {
+    "basketball": {"player_points": "PTS", "player_rebounds": "REB", "player_assists": "AST",
+                   "player_points_rebounds_assists": "PRA"},
+    "football": {"player_pass_yds": "PASS", "player_rush_yds": "RUSH", "player_reception_yds": "REC",
+                 "player_receptions": "RECS"},
+    "hockey": {"player_goals": "G", "player_assists": "A", "player_shots_on_goal": "SOG", "player_points": "PTS"},
+}
+TTL_ODDS_API = 30 * 60  # free tier = 500 requests / month: cache hard
+
+
+def odds_api_props(lg: League, home_name: str, away_name: str, game_date, api_key: str) -> dict:
+    """{(normalized name, market): (consensus line, "Sportsbooks", over_american, under_american)}."""
+    sport = ODDS_SPORT.get(lg.key)
+    if not api_key or not sport or flag_active(f"oddsapi_down_{lg.key}.flag", DOWN_TTL):
+        return {}
+    try:
+        events = disk_cached(f"oddsapi_events|{lg.key}", TTL_ODDS_API,
+                             lambda: http_json(f"{ODDS_API}/{sport}/events", {"apiKey": api_key}, retries=1))
+        hn, an = norm_name(home_name), norm_name(away_name)
+        ev = next((e for e in (events if isinstance(events, list) else [])
+                   if norm_name(e.get("home_team", "")) == hn and norm_name(e.get("away_team", "")) == an), None)
+        if not ev:
+            return {}
+        markets = ",".join(ODDS_MARKETS[lg.kind])
+        raw = disk_cached(f"oddsapi_props|{lg.key}|{ev['id']}", TTL_ODDS_API, lambda: http_json(
+            f"{ODDS_API}/{sport}/events/{ev['id']}/odds",
+            {"apiKey": api_key, "regions": "us", "markets": markets, "oddsFormat": "american"}, retries=1))
+    except Exception as e:
+        set_flag(f"oddsapi_down_{lg.key}.flag")
+        NOTES["oddsapi"] = f"The Odds API unavailable ({type(e).__name__})."
+        return {}
+    pts: dict = {}
+    for bk in raw.get("bookmakers", []) or []:
+        for mk in bk.get("markets", []) or []:
+            m = ODDS_MARKETS[lg.kind].get(mk.get("key"))
+            if not m:
+                continue
+            for oc in mk.get("outcomes", []) or []:
+                name, side, line = oc.get("description"), str(oc.get("name", "")).lower(), oc.get("point")
+                if not name or line is None:
+                    continue
+                d = pts.setdefault((norm_name(name), m), {})
+                d.setdefault(float(line), {}).setdefault(side, oc.get("price"))
+    out = {}
+    for key, by_line in pts.items():
+        line = max(by_line, key=lambda ln: len(by_line[ln]))  # most-quoted line = consensus
+        prices = by_line[line]
+        out[key] = (line, "Sportsbooks", num(prices.get("over"), default=None) if prices.get("over") is not None
+                    else None, num(prices.get("under"), default=None) if prices.get("under") is not None else None)
+    return out

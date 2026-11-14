@@ -143,8 +143,13 @@ streamlit run app.py
     both teams to score.
   * **Breakdown drawer:** every matchup card has a collapsible "Period & Half Breakdown" with all segments
     at a glance. These are model prices only, since ESPN doesn't publish period odds.
-* **No line, no verdict:** a prop without any sportsbook line shows ⚪ NO LINE with the model's lean against the
-  player's season average, instead of a PASS judged against an estimate of itself.
+* **Prop lines on every card:**
+  * **Real lines first:** ESPN sportsbook prop bets (with prices), then The Odds API (optional; set
+    `ODDS_API_KEY` in Streamlit secrets, free tier, cached 30 min), then PrizePicks, then Underdog.
+  * **Implied line when none is posted:** 50% last-5 + 50% last-10 average × the opponent's defense for that
+    stat (points / goals allowed per possession vs league; neutral where ESPN has no allowance data, e.g.
+    rebounds / assists / shots), rounded to .5, labelled "Implied line".
+  * Every card is judged 🟢 BET / 🟡 PASS on projection vs. that line, with the exact edge in the reason.
 * **BET / PASS decisions:** every game card, player-prop card, alt line and UFC bout shows 🟢 BET or 🟡 PASS
   with the reason.
   * **BET** needs the model's edge to clear the market threshold and the hit chance to be ≥ 2 percentage

@@ -134,7 +134,7 @@ def prop_decision(kind: str, m: str, label: str, proj: float, line: float, hist:
         return verdict(False, "High variance in recent games", pick, p, edge_txt)
     if gap < 0.5 * thr:
         return verdict(False, "Trap zone: line sits on the projection", pick, p, edge_txt)
-    src = "" if posted else " (est. line)"
+    src = "" if posted else " (implied line)"
     if gap >= thr and pp >= PP_EDGE:
         return verdict(True, f"{edge_txt}{src}", pick, p, edge_txt)
     if hit is not None and hit >= 0.7 and pp >= PP_EDGE:
@@ -371,3 +371,19 @@ def period_decision(lg_key: str, kind: str, g: dict, q: dict, imp: dict, seg: st
     if bets:
         return verdict(True, best[4] + " (implied line, -110)", best[2], best[3], best[4])
     return verdict(False, f"Thin edge ({best[4]})", best[2], best[3], best[4])
+
+
+# --------------------------------------------------------------------------
+# Implied consensus prop line (no sportsbook / DFS line posted)
+# --------------------------------------------------------------------------
+def implied_prop_line(kind: str, m: str, hist: list[float], opp_factor: float = 1.0) -> float | None:
+    """What a book would hang without a posted line: 50% last-5 + 50% last-10 average, scaled by the opponent's
+    defense for that stat (points / goals allowed vs league; neutral where ESPN has no allowance data),
+    rounded to a .5 line. Needs 3+ games."""
+    if len(hist) < 3:
+        return None
+    base = 0.5 * float(np.mean(hist[:5])) + 0.5 * float(np.mean(hist[:10]))
+    adj = base * (opp_factor or 1.0)
+    if (kind, m) in {("hockey", "G"), ("hockey", "A"), ("hockey", "PTS")}:
+        return 0.5 if adj < 1.0 else 1.5
+    return max(0.5, round(adj - 0.5) + 0.5)
