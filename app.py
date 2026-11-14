@@ -28,9 +28,10 @@ import engine.props
 import engine.teams
 import engine.ufc
 import engine.ufcstats
+import engine.decide
 import engine.ui
 
-_ENGINE = [engine.common, engine.espn, engine.teams, engine.props, engine.lines, engine.news, engine.ufc,
+_ENGINE = [engine.common, engine.decide, engine.espn, engine.teams, engine.props, engine.lines, engine.news, engine.ufc,
            engine.ufcstats, engine.parlays, engine.ui]  # dependency order
 
 
@@ -55,11 +56,11 @@ def _refresh_engine() -> None:
 
 _refresh_engine()
 
-from engine import espn, lines as linesmod, news as newsmod, parlays, props as propmod, teams, ufc, ufcstats  # noqa: E402
+from engine import decide, espn, lines as linesmod, news as newsmod, parlays, props as propmod, teams, ufc, ufcstats  # noqa: E402
 from engine.common import ET, NOTES, cache_fresh, clear_disk_cache, fmt_spread, ml_to_prob, norm_name  # noqa: E402
 from engine.espn import LEAGUES, League  # noqa: E402
-from engine.ui import (CSS, H, avatar_html, edge_badge, empty_card, esc, league_logo_html, logo_html,  # noqa: E402
-                       note, status_pill)
+from engine.ui import (CSS, H, avatar_html, edge_badge, empty_card, esc, ladder_html,  # noqa: E402
+                       league_logo_html, logo_html, note, status_pill, verdict_html)
 
 st.set_page_config(page_title="Sharp Board", page_icon="🏆", layout="centered", initial_sidebar_state="collapsed")
 H(CSS)
@@ -372,6 +373,22 @@ def period_card(g: dict, q: dict, code: str, label: str, kind: str, badge: str =
             + trow(a, q["pts_away"]) + trow(h, q["pts_home"]) + bar + f'<div class="mkts">{boxes}</div></div>')
 
 
+def game_alt_html(g: dict, lad: dict, kind: str) -> str:
+    h, a = g["home"]["abbr"], g["away"]["abbr"]
+    goals = kind in ("hockey", "soccer")
+    title = "Puck line / goal line" if kind == "hockey" else ("Goal line" if kind == "soccer" else "Alt spread")
+    parts = [ladder_html(f"{title} ({h} side)", lad["spread"], lambda x: f'{esc(h)} {x["line"]:+g}',
+                         ("Line", "Covers", "Fair", "")),
+             ladder_html("Alt total (over)", lad["total"], lambda x: f'O {x["line"]:g}', ("Line", "Over", "Fair", ""))]
+    for side, abbr in (("away", a), ("home", h)):
+        parts.append(ladder_html(f"{abbr} team total (over)", lad["team_totals"][side],
+                                 lambda x: f'O {x["line"]:g}', ("Line", "Over", "Fair", "")))
+    unit = "goals" if goals else "points"
+    return (f'<details class="pdrawer"><summary>Alt lines · spread, total, team totals</summary>{"".join(parts)}'
+            f'<div class="pt-note">Model probabilities and fair odds in {unit}; ESPN posts only the main line. '
+            'Main line highlighted.</div></details>')
+
+
 @st.fragment
 def matchups_fragment(games: list[dict], slate_for, b2b: set, kind: str, soccer: bool = False) -> None:
     """Market period pill bar + matchup cards (each with a Period & Half Breakdown drawer)."""
@@ -406,11 +423,19 @@ def matchups_fragment(games: list[dict], slate_for, b2b: set, kind: str, soccer:
             q = teams.period_projection(lg_, p, ph, pa_, idx_of[code])
             if q:
                 card = period_card(g, q, code, labels[code], kind, badge)
+        extra = ""
         if card is None:
             card = matchup_card(g, p, b2b, kind, badge=badge)
-        drawer = period_drawer(lg_, g, p, ph, pa_)
-        if drawer and card.endswith("</div>"):
-            card = card[:-6] + drawer + "</div>"
+            if p and g["state"] == "pre":
+                gp = min((ph or {}).get("gp", 0), (pa_ or {}).get("gp", 0))
+                extra += verdict_html(decide.game_decision(lg_.key, kind, g, p, gp))
+                extra += game_alt_html(g, decide.game_alt_ladders(lg_.key, kind, g, p), kind)
+        elif g["state"] == "pre":
+            extra += verdict_html(decide.verdict(False, f"No posted {labels[code]} odds — bet only if your book "
+                                                       "beats the fair price shown"))
+        extra += period_drawer(lg_, g, p, ph, pa_)
+        if extra and card.endswith("</div>"):
+            card = card[:-6] + extra + "</div>"
         html.append(card)
     H("".join(html))
 
@@ -555,17 +580,44 @@ def news_html(a: dict | None) -> str:
     return f'<div class="news">📰 {head} <span>{esc(newsmod.age(a["published"]))}</span></div>'
 
 
-def prop_card(r: dict, m: str, label: str, kind: str, b2b_ids: set[str], book: tuple | None = None,
+def prop_line_info(r: dict, m: str, label: str, kind: str, book: tuple | None, tier: int) -> dict:
+    """Main line (posted PrizePicks/Underdog line, else last-10-average estimate, else model line), the alt line
+    for the selected tier, the BET/PASS verdict for the shown line, and the full alt ladder."""
+    hist = r.get(f"V10_{m}") or []
+    proj = r[f"P_{m}"]
+    if book:
+        main, src, posted = book[0], book[1], True
+    else:
+        est = parlays._proxy_line(kind, m, hist)
+        main, src, posted = (est, "Est. line", False) if est is not None else (r[f"L_{m}"], "Model line", False)
+    ladder = decide.prop_alt_ladder(kind, m, proj, hist, main)
+    line = decide.shift_line(kind, m, main, tier)
+    if line == main:
+        v = decide.prop_decision(kind, m, label, proj, line, hist, posted, r.get("Class", "ACTIVE"))
+        shown = src
+    else:
+        row = next((x for x in ladder if abs(x["line"] - line) < 1e-9), None)
+        p_over = decide.prop_p_over(kind, m, proj, hist, line)
+        hit = row["hit"] if row else None
+        bet = bool(row and row["verdict"] == "BET")
+        why = (f"Alt line · model {p_over * 100:.0f}%"
+               + (f" · L10 {hit * 100:.0f}%" if hit is not None else "") + f" · fair {decide.american(p_over)}")
+        if not bet:
+            why += " — price too short" if p_over > decide.ALT_MAX_P else " — not enough cushion"
+        v = decide.verdict(bet, why, f"Over {line:g} {label}", p_over)
+        shown = f"Alt {line - main:+g}"
+    return {"main": main, "line": line, "label": shown, "posted": posted, "verdict": v, "ladder": ladder,
+            "src": src}
+
+
+def prop_card(r: dict, m: str, label: str, kind: str, b2b_ids: set[str], info: dict,
               news_item: dict | None = None) -> str:
     lean, strong = propmod.EDGE[kind][m]
     proj = r[f"P_{m}"]
-    if book:
-        line, line_label = book[0], book[1]
-        hist = r.get(f"V10_{m}") or []
-        hit_v = float(sum(v > line for v in hist) / len(hist) * 100) if hist else float("nan")
-    else:
-        line, line_label, hit_v = r[f"L_{m}"], "Model line", r[f"H_{m}"]
-    edge = prop_edge(r, m, book)
+    line = info["line"]
+    hist = r.get(f"V10_{m}") or []
+    hit_v = float(sum(v > line for v in hist) / len(hist) * 100) if hist else float("nan")
+    edge = proj - line
     small = kind == "hockey" or m == "RECS"
     f1 = "{:.2f}" if kind == "hockey" and m in ("G", "A", "PTS") else "{:.1f}"
     chips = "".join(f'<span class="chip {"o" if v > line else "u"}">{v:.0f}</span>' for v in r[f"V5_{m}"])
@@ -580,6 +632,13 @@ def prop_card(r: dict, m: str, label: str, kind: str, b2b_ids: set[str], book: t
     mini = "".join(
         f'<span>{esc(mm)} <b>{r[f"P_{mm}"]:{".2f" if kind == "hockey" and mm != "SOG" else ".1f"}}</b> '
         f'<small>(L5 {r[f"A5_{mm}"]:.1f})</small></span>' for mm in others)
+    ladder = ladder_html(f'Alt {label} ladder · main {info["main"]:g} ({info["src"]})', info["ladder"],
+                         lambda x: f'O {x["line"]:g}' + (f' <small>{x["offset"]:+g}</small>' if x["offset"] else ""),
+                         ("Line", "Model", "Fair", ""))
+    alt = (f'<details class="pdrawer"><summary>Alt lines ({len(info["ladder"])})</summary>{ladder}'
+           '<div class="pt-note">Alt prices aren\'t in any free feed: fair odds are the model\'s. BET needs the '
+           'model at 62–85% (higher means the price is too short to be worth it) and the last 10 games ≥ 60% '
+           'over that line.</div></details>')
     return (
         f'<div class="card"><div class="phead">{avatar_html(r["Headshot"], r["Player"])}'
         f'<div class="pmeta"><div class="pname">{esc(r["Player"])}</div>'
@@ -587,13 +646,14 @@ def prop_card(r: dict, m: str, label: str, kind: str, b2b_ids: set[str], book: t
         f'{status_pill(r["Class"], r["Status"])} {b2b} {extra}</div></div>{badge}</div>'
         '<div class="pgrid">'
         f'<div class="pbox hl"><span class="lbl">Proj {esc(label)}</span><div class="num">{f1.format(proj)}</div></div>'
-        f'<div class="pbox{" book" if book else ""}"><span class="lbl">{esc(line_label)}</span>'
-        f'<div class="num">{line:.1f}</div></div>'
+        f'<div class="pbox{" book" if info["posted"] and info["line"] == info["main"] else ""}">'
+        f'<span class="lbl">{esc(info["label"])}</span><div class="num">{line:g}</div></div>'
         f'<div class="pbox"><span class="lbl">{l5_label}</span><div class="num">{r[f"A5_{m}"]:.{2 if small else 1}f}</div></div>'
         f'<div class="pbox"><span class="lbl">L10 hit</span><div class="num">{hit}</div></div>'
         '</div>'
         f'<div class="l5"><span class="lbl" style="margin-right:4px">Last 5</span>{chips or "—"}</div>'
-        f'<div class="mini">{mini}</div>{news_html(news_item)}</div>'
+        f'{verdict_html(info["verdict"])}'
+        f'<div class="mini">{mini}</div>{alt}{news_html(news_item)}</div>'
     )
 
 
@@ -719,11 +779,23 @@ def props_fragment(games: list[dict], slate: dict, inj: list[dict]) -> None:
                              width="stretch") or markets[0][0]
     side = st.segmented_control("Team", ["Both", g["away"]["abbr"], g["home"]["abbr"]], default="Both",
                                 key=f"side_{sport}_{gid}", label_visibility="collapsed", width="stretch") or "Both"
+    steps = decide.ALT_STEPS.get((kind, m), (1, 2, 3))
+    tier_lbl = {t: ("Main line" if t == 0 else f"Alt {'+' if t > 0 else '−'}{steps[abs(t) - 1]:g}")
+                for t in (-3, -2, -1, 0, 1, 2, 3)}
+    up_only = (kind, m) in decide.LADDER_UP_ONLY
+    tier = st.segmented_control("Alt line", list(tier_lbl), default=0, key=f"tier_{sport}",
+                                format_func=tier_lbl.get, label_visibility="collapsed", width="stretch")
+    tier = 0 if tier is None else tier
+    if up_only and tier < 0:  # goals / assists / points ladders start at 0.5
+        note(f"{mlabels[m]} lines start at 0.5, so only the + alt tiers apply — showing the main line.")
+        tier = 0
     n_book = sum(1 for (_, mm) in book if mm == m)
-    note((f"Edge = projection vs. the live PrizePicks / Underdog line where one is posted ({n_book} {mlabels[m]} "
-          "lines on the board), otherwise vs. the last-5 average. " if n_book else
-          "No PrizePicks / Underdog lines found right now, so edge = projection vs. last-5 average. ")
-         + "Chips = last 5 games, green when over the line. Hit = share of last 10 games over the line.")
+    note((f"Line = live PrizePicks / Underdog line where posted ({n_book} {mlabels[m]} lines on the board), "
+          "otherwise an estimated line from the player's last-10 average. " if n_book else
+          "No PrizePicks / Underdog lines found right now, so each card uses an estimated line (last-10 "
+          "average). ")
+         + "🟢 BET = edge clears the market threshold and ≥ 2pp over -115 break-even; 🟡 PASS otherwise. "
+           "Chips = last 5 games, green when over the line.")
     if df.empty:
         empty_card("No players with recent game logs for this matchup yet.")
         return
@@ -737,10 +809,14 @@ def props_fragment(games: list[dict], slate: dict, inj: list[dict]) -> None:
         return
     recs = df.to_dict("records")
     for r in recs:
-        r["_book"] = book.get((norm_name(r["Player"]), m))
-        r["_e"] = abs(prop_edge(r, m, r["_book"]))
-    recs.sort(key=lambda r: (r["_book"] is None, -r["_e"]))  # posted lines first, biggest edges on top
-    H("".join(prop_card(r, m, mlabels[m], kind, slate["b2b"], r["_book"],
+        r["_info"] = prop_line_info(r, m, mlabels[m], kind, book.get((norm_name(r["Player"]), m)), tier)
+        r["_e"] = abs(r[f"P_{m}"] - r["_info"]["line"])
+    # BET cards first, then posted lines, then biggest edges
+    recs.sort(key=lambda r: (r["_info"]["verdict"]["verdict"] != "BET", not r["_info"]["posted"], -r["_e"]))
+    n_bet = sum(r["_info"]["verdict"]["verdict"] == "BET" for r in recs)
+    H(f'<div class="note"><b>{n_bet}</b> BET · <b>{len(recs) - n_bet}</b> PASS on {esc(mlabels[m])}'
+      + (f" at {esc(tier_lbl[tier])}" if tier else "") + "</div>")
+    H("".join(prop_card(r, m, mlabels[m], kind, slate["b2b"], r["_info"],
                         newsmod.for_player(arts, r["Id"], r["Player"])) for r in recs))
 
 
@@ -826,8 +902,15 @@ def bout_card(x: dict) -> str:
                  + (f' · mkt {pred["market"] * 100:.0f}%' if pred["market"] else "") + '</span></div>')
     bar = (f'<div class="winbar"><div class="r" style="width:{p * 100:.0f}%"></div>'
            f'<div class="b" style="width:{(1 - p) * 100:.0f}%"></div></div>')
+    if b["state"] == "pre":
+        fp, f_ = (fa_, pa_) if pred["pick"] == 0 else (fb_, pb_)
+        model_only = pred["p_model"] if pred["pick"] == 0 else 1 - pred["p_model"]
+        v_html = verdict_html(decide.fight_decision(_last(f_["name"]), pick_p, fp.get("ml"), model_only))
+    else:
+        v_html = ""
     return (f'<div class="card">{head}' + fighter_row(fa_, pa_, p, pred["pick"] == 0, fa_.get("winner"))
-            + bar + fighter_row(fb_, pb_, 1 - p, pred["pick"] == 1, fb_.get("winner")) + pick_html + '</div>')
+            + bar + fighter_row(fb_, pb_, 1 - p, pred["pick"] == 1, fb_.get("winner")) + pick_html + v_html
+            + '</div>')
 
 
 def render_ufc() -> None:

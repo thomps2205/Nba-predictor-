@@ -59,6 +59,27 @@ text-transform:uppercase;letter-spacing:.05em}
 .pt.fg{background:rgba(34,197,94,.06)}
 .pt .sg{font-weight:800;color:var(--green)}
 .pt-note{color:var(--muted);font-size:.68rem;margin-top:6px}
+.verdict{display:flex;align-items:center;gap:8px;margin:10px 0 2px;padding:8px 10px;border-radius:12px;
+font-size:.8rem;line-height:1.35}
+.verdict.bet{background:rgba(34,197,94,.12);border:1px solid rgba(34,197,94,.45)}
+.verdict.pass{background:rgba(245,158,11,.10);border:1px solid rgba(245,158,11,.40)}
+.verdict .vtxt{color:var(--text);min-width:0}
+.vpill{display:inline-block;flex:none;font-size:.72rem;font-weight:900;padding:4px 9px;border-radius:999px;
+letter-spacing:.04em;white-space:nowrap}
+.vpill.bet{background:var(--green);color:#04210f}
+.vpill.pass{background:var(--amber);color:#2a1a02}
+.vpill.sm{font-size:.6rem;padding:2px 6px}
+.lad-title{font-size:.7rem;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;
+margin:10px 0 5px}
+.ladtab{border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.lad{display:grid;grid-template-columns:1.25fr 1.35fr .9fr 1.1fr;gap:4px;padding:6px 8px;font-size:.76rem;
+align-items:center;border-top:1px solid var(--line);font-variant-numeric:tabular-nums}
+.lad small{color:var(--muted);font-size:.66rem}
+.lad.head{border-top:0;background:var(--card2);color:var(--muted);font-size:.6rem;font-weight:800;
+text-transform:uppercase;letter-spacing:.05em}
+.lad.main{background:rgba(56,189,248,.08)}
+.lad span:last-child{text-align:right}
+.lg-main-tag{font-size:.6rem;font-weight:800;color:var(--blue)}
 .region-h{color:var(--muted);font-size:.68rem;font-weight:800;letter-spacing:.09em;text-transform:uppercase;margin:10px 2px 4px}
 .trow{display:flex;align-items:center;gap:10px;padding:6px 0}
 .logo{width:34px;height:34px;object-fit:contain;flex:none}
@@ -243,6 +264,35 @@ def status_pill(cls: str, status: str) -> str:
     if cls == "Q":
         return f'<span class="pill q">{esc(status or "Questionable")}</span>'
     return ""
+
+
+def verdict_html(v: dict | None, compact: bool = False) -> str:
+    """Prominent BET / PASS strip: 🟢 BET · pick · reason   or   🟡 PASS · reason."""
+    if not v:
+        return ""
+    bet = v["verdict"] == "BET"
+    icon, cls = ("🟢", "bet") if bet else ("🟡", "pass")
+    pick = f'<b>{esc(v["pick"])}</b>' if v.get("pick") else ""
+    if compact:
+        return f'<span class="vpill {cls}">{icon} {v["verdict"]}</span>'
+    return (f'<div class="verdict {cls}"><span class="vpill {cls}">{icon} {v["verdict"]}</span>'
+            f'<span class="vtxt">{pick}{" · " if pick else ""}{esc(v["reason"])}</span></div>')
+
+
+def ladder_html(title: str, rows: list[dict], fmt_line, cols: tuple[str, ...] = ("Line", "Hit %", "Fair", "")) -> str:
+    """One alt-line table. rows: line, p, fair, optional hit, optional verdict, main flag."""
+    head = "".join(f"<span>{esc(c)}</span>" for c in cols)
+    body = []
+    for r in rows:
+        v = r.get("verdict")
+        tag = (f'<span class="vpill {"bet" if v == "BET" else "pass"} sm">{"🟢" if v == "BET" else "🟡"} {v}</span>'
+               if v else (f'<span class="lg-main-tag">MAIN</span>' if r.get("main") else ""))
+        hit = f'{r["hit"] * 100:.0f}%' if r.get("hit") is not None else ""
+        cells = [fmt_line(r), f'{r["p"] * 100:.0f}%' + (f' <small>L10 {hit}</small>' if hit else ""), r["fair"], tag]
+        body.append(f'<div class="lad{" main" if r.get("main") else ""}">'
+                    + "".join(f"<span>{c}</span>" for c in cells) + "</div>")
+    return (f'<div class="lad-title">{esc(title)}</div><div class="ladtab"><div class="lad head">{head}</div>'
+            + "".join(body) + "</div>")
 
 
 def note(text: str) -> None:

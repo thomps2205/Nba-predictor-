@@ -117,6 +117,25 @@ streamlit run app.py
     both teams to score.
   * **Breakdown drawer:** every matchup card has a collapsible "Period & Half Breakdown" with all segments
     at a glance. These are model prices only, since ESPN doesn't publish period odds.
+* **BET / PASS decisions:** every game card, player-prop card, alt line and UFC bout shows 🟢 BET or 🟡 PASS
+  with the reason.
+  * **BET** needs the model's edge to clear the market threshold and the hit chance to be ≥ 2 percentage
+    points above break-even. Thresholds: 2.0 pts for spreads and totals, 0.3 goals for NHL/soccer totals,
+    2.0 pts / 1.0 reb-ast / 15 pass yds for props. Break-evens: -110, the posted moneyline, or -115 for props.
+    A ≥ 70% last-10 hit rate with a probability edge also qualifies.
+  * **PASS** reasons: thin edge, trap zone (line sits on the projection, NFL key numbers 3/7, unders at 0.5),
+    small sample, high recent variance, or a questionable player.
+  * The props tab lists BET cards first and shows a "N BET · M PASS" count.
+* **Alternate lines:**
+  * **Player props:** every card has an "Alt lines" ladder with the main line ± three tiers: ±2/4/6 for
+    points and PRA, ±1/2/3 for rebounds, assists, receptions and shots, ±10/20/30 for yards, and + tiers only
+    for NHL goals/assists/points. Each rung shows model probability, last-10 hit rate, fair odds and BET/PASS.
+  * **Alt-line selector:** shifts every card in the props tab to an alt tier at once.
+  * **Game cards:** an "Alt lines" drawer with alt spread / puck line / goal line, alt total and both team
+    totals.
+  * **Pricing:** no free feed posts alt prices, so alt rows show the model's fair odds. An alt BET needs a
+    62–85% model probability (higher means the price is too short) and a ≥ 60% last-10 hit rate.
+  * Props without a PrizePicks / Underdog line use an estimated line (last-10 average), marked "est. line".
 * **Injuries** (NBA, NFL, NHL) shows ESPN's report for every team on the slate.
 * **UFC:**
   * **Fight Card** lists every bout from the main event down to the prelims, with records, odds, win
