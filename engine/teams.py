@@ -408,3 +408,33 @@ def project_game(lg: League, game: dict, ph: dict | None, pa_: dict | None, base
 def back_to_back_teams(profiles: dict[str, dict], slate_date: date) -> set[str]:
     y = slate_date - timedelta(days=1)
     return {tid for tid, p in profiles.items() if p and p["last_date"] == y}
+
+
+# --------------------------------------------------------------------------
+# Market blend (college): few games + no strength-of-schedule -> lean on the betting line early
+# --------------------------------------------------------------------------
+BLEND = {"NCAAB": {"k": 12.0, "cap": 0.5}}
+
+
+def market_blend(lg: League, game: dict, proj: dict, gp: int) -> dict:
+    """Blend the projected scores with the market-implied scores (home = (total - spread) / 2, away = (total +
+    spread) / 2). Model weight = gp / (gp + k), capped; spread, total and win probability are recomputed."""
+    rule = BLEND.get(lg.key)
+    o = game.get("odds") or {}
+    if not rule or not proj or (o.get("spread_home") is None and o.get("total") is None):
+        return proj
+    w = min(gp / (gp + rule["k"]), rule["cap"]) if gp > 0 else 0.0
+    m_h, m_a = proj["pts_home"], proj["pts_away"]
+    total = o["total"] if o.get("total") is not None else m_h + m_a
+    spread = o["spread_home"] if o.get("spread_home") is not None else -(m_h - m_a)
+    k_h, k_a = (total - spread) / 2, (total + spread) / 2
+    out = dict(proj)
+    out["model_raw"] = {"pts_home": m_h, "pts_away": m_a, "spread_home": proj["spread_home"], "total": proj["total"]}
+    out["pts_home"] = w * m_h + (1 - w) * k_h
+    out["pts_away"] = w * m_a + (1 - w) * k_a
+    margin = out["pts_home"] - out["pts_away"]
+    out["spread_home"] = -margin
+    out["total"] = out["pts_home"] + out["pts_away"]
+    out["home_win_prob"] = norm_cdf(margin / cfg(lg.key)["sigma"])
+    out["blend_w"] = w
+    return out

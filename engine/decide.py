@@ -43,6 +43,7 @@ ALT_STEPS = {
 UNIT = {"PTS": "pts", "REB": "reb", "AST": "ast", "PRA": "PRA", "PASS": "yds", "RUSH": "yds", "REC": "yds",
         "RECS": "rec", "G": "goals", "A": "ast", "SOG": "shots"}
 LADDER_UP_ONLY = {("hockey", "G"), ("hockey", "A"), ("hockey", "PTS")}  # these start at 0.5: only + tiers
+GAP_SPREAD, GAP_TOTAL = 12.0, 15.0  # raw model vs market beyond this = model error, not value (blended sports)
 GAME_EDGE = {"basketball": 2.0, "football": 2.0, "hockey": 0.3, "soccer": 0.3}  # spread / total gap for a BET
 GAME_ALT_STEPS = {"basketball": (2, 4, 6), "football": (2, 4, 6), "hockey": (1, 2, 3), "soccer": (1, 2, 3)}
 TOTAL_SD = {"NBA": 17.0, "NCAAB": 15.0, "NFL": 13.0}
@@ -221,7 +222,11 @@ def game_decision(lg_key: str, kind: str, g: dict, p: dict, team_gp: int) -> dic
         reason = "Thin edge"
         if lg_key == "NFL" and abs(s) in NFL_KEY_NUMBERS and abs(gap_h) < 3:
             reason = f"Trap zone: key number {abs(s):g}"
-        bet = abs(gap_h) >= thr and pc - BE_STD >= PP_EDGE and not reason.startswith("Trap")
+        raw = p.get("model_raw")
+        if raw and abs(raw["spread_home"] - s) > GAP_SPREAD:
+            reason = (f"Model vs market gap too big ({abs(raw['spread_home'] - s):.0f} pts raw) — the model is "
+                      "likely missing information")
+        bet = abs(gap_h) >= thr and pc - BE_STD >= PP_EDGE and not reason.startswith(("Trap", "Model vs"))
         cands.append((bet, pc - BE_STD, pick, pc, f"{abs(gap_h):.1f} pts vs the spread · {pc * 100:.0f}% to cover",
                       reason))
     if o.get("total") is not None:
@@ -231,9 +236,13 @@ def game_decision(lg_key: str, kind: str, g: dict, p: dict, team_gp: int) -> dic
         pc = po if over else 1 - po
         gap = abs(p["total"] - t)
         unit = "goals" if kind in ("hockey", "soccer") else "pts"
-        bet = gap >= thr and pc - BE_STD >= PP_EDGE
+        raw = p.get("model_raw")
+        t_reason = "Thin edge"
+        if raw and abs(raw["total"] - t) > GAP_TOTAL:
+            t_reason = f"Model vs market gap too big ({abs(raw['total'] - t):.0f} pts raw on the total)"
+        bet = gap >= thr and pc - BE_STD >= PP_EDGE and t_reason == "Thin edge"
         cands.append((bet, pc - BE_STD, f'{"Over" if over else "Under"} {t:g}', pc,
-                      f"{gap:.1f} {unit} vs the total · {pc * 100:.0f}% to hit", "Thin edge"))
+                      f"{gap:.1f} {unit} vs the total · {pc * 100:.0f}% to hit", t_reason))
     mls = [("home", h["abbr"], o.get("ml_home")), ("away", a["abbr"], o.get("ml_away"))]
     if kind == "soccer":
         mls.append(("draw", "Draw", o.get("ml_draw")))
@@ -244,7 +253,9 @@ def game_decision(lg_key: str, kind: str, g: dict, p: dict, team_gp: int) -> dic
             continue
         be = 100 / (ml + 100) if ml > 0 else -ml / (-ml + 100)
         pc = probs[side]
-        bet = pc - be >= PP_EDGE and pc >= 0.35
+        raw = p.get("model_raw")
+        ml_gap = (raw and o.get("spread_home") is not None and abs(raw["spread_home"] - o["spread_home"]) > GAP_SPREAD)
+        bet = pc - be >= PP_EDGE and pc >= 0.35 and not ml_gap
         cands.append((bet, pc - be, f"{name} ML" if side != "draw" else "Draw", pc,
                       f"{pc * 100:.0f}% vs {be * 100:.0f}% break-even at {ml:+.0f}", "Thin edge"))
     if not cands:

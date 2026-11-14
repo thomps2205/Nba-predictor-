@@ -158,7 +158,7 @@ def nfl_week_window(d: date) -> tuple[date, int]:
 
 @st.cache_data(ttl=600, show_spinner=False, max_entries=48)
 def compute_slate(lg_key: str, game_ids: tuple, q: float, inj_sig: tuple, tick: int,
-                  _games: list[dict], _inj: list[dict]) -> dict:
+                  _games: list[dict], _inj: list[dict], odds_sig: tuple = ()) -> dict:
     lg_ = LEAGUES[lg_key]
     profiles: dict[str, dict | None] = {}
     for g in _games:
@@ -186,6 +186,11 @@ def compute_slate(lg_key: str, game_ids: tuple, q: float, inj_sig: tuple, tick: 
                 projections[g["id"]] = p
         except Exception as e:
             NOTES[f"model {g['id']}"] = f"Projection failed for {g['away']['abbr']} @ {g['home']['abbr']}: {e}"
+    if lg_key in teams.BLEND:  # college: blend with the betting line (model weight grows with games played)
+        for g in _games:
+            if g["id"] in projections:
+                gp = min((profiles.get(g["home"]["id"]) or {}).get("gp", 0), (profiles.get(g["away"]["id"]) or {}).get("gp", 0))
+                projections[g["id"]] = teams.market_blend(lg_, g, projections[g["id"]], gp)
     return {"profiles": profiles, "base": base, "b2b": b2b, "projections": projections,
             "nba_adv": bool(nba_adv)}
 
@@ -233,6 +238,8 @@ def matchup_card(g: dict, p: dict | None, b2b: set[str], kind: str, badge: str =
     tags = "".join(f'<span class="pill b2b">{esc(t["abbr"])} B2B</span>' for t in (a, h) if t["id"] in b2b)
     if g["neutral"]:
         tags += '<span class="pill info">Neutral</span>'
+    if p and p.get("blend_w") is not None:
+        tags += f'<span class="pill info">{p["blend_w"] * 100:.0f}% model · {100 - p["blend_w"] * 100:.0f}% mkt</span>'
     tip = g["tip"].strftime("%a %-I:%M %p ET") if g["tip"] is not None else ""
     dec = 1 if kind in ("hockey", "soccer") else 0
 
@@ -845,7 +852,8 @@ def load_team_data(sk: str, games: list[dict]) -> tuple[dict, list[dict]]:
                                 "model or show no projection.")
     inj_sig = tuple((i["team_id"], i["key"], i["status"]) for i in inj)
     with st.spinner(f"Crunching {sk} projections…"):
-        slate = compute_slate(sk, tuple(g["id"] for g in games), float(q_sit), inj_sig, bucket(), games, inj)
+        odds_sig = tuple((g["id"], g["odds"].get("spread_home"), g["odds"].get("total")) for g in games)
+        slate = compute_slate(sk, tuple(g["id"] for g in games), float(q_sit), inj_sig, bucket(), games, inj, odds_sig)
     return slate, inj
 
 

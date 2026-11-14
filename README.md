@@ -117,6 +117,7 @@ streamlit run app.py
     (`soccer/all/teams/{id}/schedule`). It then tries the club's domestic leagues, or other international
     competitions for national teams.
   * **Parlays:** soccer legs appear in the Parlays tab and in MIX.
+* **College market blend:** NCAAB projections are blended with the betting line. The market-implied score is home = (total − spread)/2, away = (total + spread)/2. The model's weight is games/(games + 12), capped at 50% (≈20% after 3 games, 50% by mid-season); spread, total and win probability are recomputed. Cards show the mix (e.g. "20% model · 80% mkt"). If the raw model is more than 12 pts off the spread (15 on the total), that market is PASS: such gaps mean the model is missing information, not that it found value.
 * **Lines on live and finished games:** ESPN removes `competitions[0].odds` from the scoreboard once a game
   starts.
   * Every pregame line is saved per event, refreshed until tip-off, so it is the closing line.
