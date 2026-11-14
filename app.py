@@ -29,10 +29,11 @@ import engine.teams
 import engine.ufc
 import engine.ufcstats
 import engine.decide
+import engine.report
 import engine.ui
 
 _ENGINE = [engine.common, engine.decide, engine.espn, engine.teams, engine.props, engine.lines, engine.news, engine.ufc,
-           engine.ufcstats, engine.parlays, engine.ui]  # dependency order
+           engine.ufcstats, engine.parlays, engine.ui, engine.report]  # dependency order
 
 
 @st.cache_resource(show_spinner=False)
@@ -56,7 +57,7 @@ def _refresh_engine() -> None:
 
 _refresh_engine()
 
-from engine import decide, espn, lines as linesmod, news as newsmod, parlays, props as propmod, teams, ufc, ufcstats  # noqa: E402
+from engine import decide, report, espn, lines as linesmod, news as newsmod, parlays, props as propmod, teams, ufc, ufcstats  # noqa: E402
 from engine.common import ET, NOTES, cache_fresh, clear_disk_cache, fmt_spread, ml_to_prob, norm_name  # noqa: E402
 from engine.espn import LEAGUES, League  # noqa: E402
 from engine.ui import (CSS, H, avatar_html, edge_badge, empty_card, esc, ladder_html,  # noqa: E402
@@ -64,6 +65,7 @@ from engine.ui import (CSS, H, avatar_html, edge_badge, empty_card, esc, ladder_
 
 st.set_page_config(page_title="Sharp Board", page_icon="🏆", layout="centered", initial_sidebar_state="collapsed")
 H(CSS)
+H(report.REPORT_CSS)
 
 NOTES.clear()  # notes describe this run only (engine code adds stale-cache / endpoint warnings as it goes)
 now_et = datetime.now(ET)
@@ -100,9 +102,20 @@ def prefetch(reqs: list[tuple], label: str) -> int:
 # --------------------------------------------------------------------------
 # Header: sport switcher + settings
 # --------------------------------------------------------------------------
-sport = st.segmented_control("Sport", SPORTS, default="NBA", key="sport_pick",
-                             label_visibility="collapsed", width="stretch")
-if sport is None:  # tapping the active button deselects it; keep the last sport
+SPORT_NAME = {"NBA": "NBA", "NCAAB": "College Hoops", "NFL": "NFL", "NHL": "NHL", "SOCCER": "Soccer", "UFC": "UFC",
+              "MIX": "Mixed Parlays"}
+BRAND_MARK = ('<svg class="mark" viewBox="0 0 40 40" fill="none"><rect x="1" y="1" width="38" height="38" rx="11" '
+              'fill="#0f1a12" stroke="#3ddc84" stroke-width="1.5"/><path d="M9 27l7-8 5 5 10-12" stroke="#3ddc84" '
+              'stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><circle cx="31" cy="12" r="2.6" '
+              'fill="#3ddc84"/></svg>')
+with st.container(key="topbar"):
+    c_brand, c_sport = st.columns([1.15, 1])
+    with c_brand:
+        H(f'<div class="topbar">{BRAND_MARK}<div class="bn">Sharp<span>Board</span></div></div>')
+    with c_sport:
+        sport = st.selectbox("Sport", SPORTS, key="sport_pick", label_visibility="collapsed",
+                             format_func=lambda k: f"{SPORT_ICON[k]}  {SPORT_NAME[k]}")
+if sport is None:
     sport = st.session_state.get("last_sport", "NBA")
 st.session_state["last_sport"] = sport
 lg = LEAGUES.get(sport)  # None for the mixed-parlay view
@@ -610,6 +623,16 @@ def prop_line_info(r: dict, m: str, label: str, kind: str, book: tuple | None, t
             "src": src}
 
 
+def alt_drawer(info: dict, label: str) -> str:
+    ladder = ladder_html(f'Alt {label} ladder · main {info["main"]:g} ({info["src"]})', info["ladder"],
+                         lambda x: f'O {x["line"]:g}' + (f' <small>{x["offset"]:+g}</small>' if x["offset"] else ""),
+                         ("Line", "Model", "Fair", ""))
+    return (f'<details class="pdrawer"><summary>Alt lines ({len(info["ladder"])})</summary>{ladder}'
+            '<div class="pt-note">Alt prices aren\'t in any free feed: fair odds are the model\'s. BET needs the '
+            'model at 62–85% (higher means the price is too short to be worth it) and the last 10 games ≥ 60% '
+            'over that line.</div></details>')
+
+
 def prop_card(r: dict, m: str, label: str, kind: str, b2b_ids: set[str], info: dict,
               news_item: dict | None = None) -> str:
     lean, strong = propmod.EDGE[kind][m]
@@ -632,13 +655,7 @@ def prop_card(r: dict, m: str, label: str, kind: str, b2b_ids: set[str], info: d
     mini = "".join(
         f'<span>{esc(mm)} <b>{r[f"P_{mm}"]:{".2f" if kind == "hockey" and mm != "SOG" else ".1f"}}</b> '
         f'<small>(L5 {r[f"A5_{mm}"]:.1f})</small></span>' for mm in others)
-    ladder = ladder_html(f'Alt {label} ladder · main {info["main"]:g} ({info["src"]})', info["ladder"],
-                         lambda x: f'O {x["line"]:g}' + (f' <small>{x["offset"]:+g}</small>' if x["offset"] else ""),
-                         ("Line", "Model", "Fair", ""))
-    alt = (f'<details class="pdrawer"><summary>Alt lines ({len(info["ladder"])})</summary>{ladder}'
-           '<div class="pt-note">Alt prices aren\'t in any free feed: fair odds are the model\'s. BET needs the '
-           'model at 62–85% (higher means the price is too short to be worth it) and the last 10 games ≥ 60% '
-           'over that line.</div></details>')
+    alt = alt_drawer(info, label)
     return (
         f'<div class="card"><div class="phead">{avatar_html(r["Headshot"], r["Player"])}'
         f'<div class="pmeta"><div class="pname">{esc(r["Player"])}</div>'
@@ -812,12 +829,21 @@ def props_fragment(games: list[dict], slate: dict, inj: list[dict]) -> None:
         r["_info"] = prop_line_info(r, m, mlabels[m], kind, book.get((norm_name(r["Player"]), m)), tier)
         r["_e"] = abs(r[f"P_{m}"] - r["_info"]["line"])
     # BET cards first, then posted lines, then biggest edges
-    recs.sort(key=lambda r: (r["_info"]["verdict"]["verdict"] != "BET", not r["_info"]["posted"], -r["_e"]))
+    for r in recs:
+        r["_conf"] = report.confidence(r, m, r["_info"])
+    recs.sort(key=lambda r: (r["_info"]["verdict"]["verdict"] != "BET", -r["_conf"], -r["_e"]))
     n_bet = sum(r["_info"]["verdict"]["verdict"] == "BET" for r in recs)
     H(f'<div class="note"><b>{n_bet}</b> BET · <b>{len(recs) - n_bet}</b> PASS on {esc(mlabels[m])}'
-      + (f" at {esc(tier_lbl[tier])}" if tier else "") + "</div>")
-    H("".join(prop_card(r, m, mlabels[m], kind, slate["b2b"], r["_info"],
-                        newsmod.for_player(arts, r["Id"], r["Player"])) for r in recs))
+      + (f" at {esc(tier_lbl[tier])}" if tier else "") + " · tap a player below for the full report</div>")
+    H('<div class="pklist">' + "".join(report.pick_row(r, m, mlabels[m], r["_info"], r["_conf"]) for r in recs)
+      + "</div>")
+    by_id = {r["Id"]: r for r in recs}
+    pid = st.selectbox("Player report", list(by_id), key=f"rep_{sport}_{gid}", label_visibility="collapsed",
+                       format_func=lambda i: f'📋  {by_id[i]["Player"]} · {by_id[i]["Team"]}')
+    r = by_id[pid]
+    H(report.report(SPORT_NAME.get(sport, sport), r, m, mlabels[m], kind, r["_info"], r["_conf"],
+                    verdict_html(r["_info"]["verdict"]), alt_drawer(r["_info"], mlabels[m]),
+                    news_html(newsmod.for_player(arts, r["Id"], r["Player"]))))
 
 
 def render_injuries(games: list[dict], inj: list[dict]) -> None:

@@ -9,9 +9,24 @@ import streamlit as st
 
 CSS = """
 <style>
-:root{--bg:#0b0f14;--card:#121821;--card2:#18202b;--line:#232d3a;--text:#e8edf3;--muted:#8b97a7;
---green:#22c55e;--green-bg:rgba(34,197,94,.14);--red:#f43f5e;--red-bg:rgba(244,63,94,.14);
---amber:#f59e0b;--amber-bg:rgba(245,158,11,.15);--blue:#38bdf8;--blue-bg:rgba(56,189,248,.14)}
+:root{--bg:#000;--card:#0b0b0d;--card2:#141519;--line:#222327;--text:#f2f3f5;--muted:#8a8f98;
+--green:#3ddc84;--green-bg:rgba(61,220,132,.13);--red:#f43f5e;--red-bg:rgba(244,63,94,.14);--pink:#f43f5e;
+--gold:#e8b931;--amber:#f5b83d;--amber-bg:rgba(245,184,61,.14);--blue:#4f8cff;--blue-bg:rgba(79,140,255,.14)}
+.stApp,[data-testid="stAppViewContainer"],[data-testid="stHeader"]{background:#000}
+.card{border-radius:20px !important}
+.topbar{display:flex;align-items:center;gap:10px;height:46px}
+.topbar .mark{width:38px;height:38px;flex:none}
+.topbar .bn{font-weight:800;font-size:1.05rem;color:var(--text);letter-spacing:-.01em}
+.topbar .bn span{color:var(--green)}
+.st-key-topbar [data-testid="stHorizontalBlock"]{flex-wrap:nowrap !important;align-items:center;gap:8px}
+.st-key-topbar [data-testid="stColumn"]{min-width:0 !important;width:auto !important;flex:1 1 auto !important}
+.st-key-sport_pick div[role="group"],.st-key-sport_pick [data-baseweb="select"]>div{border-radius:999px !important;
+background:rgba(79,140,255,.10) !important;border-color:#2b5fd9 !important;border-width:1.5px !important}
+.st-key-sport_pick div[role="group"] *,.st-key-sport_pick [data-baseweb="select"] *{color:#7fb0ff !important;
+font-weight:700 !important}
+.st-key-sport_pick svg{fill:#7fb0ff !important;color:#7fb0ff !important}
+.st-key-topbar [data-testid="stColumn"]:last-child{display:flex;align-items:center}
+.st-key-topbar [data-testid="stColumn"]:last-child>div{width:100%}
 .stApp{background:var(--bg)}
 .block-container{padding:4.2rem .8rem 3rem;max-width:760px}
 /* keep the sport switcher reachable below Streamlit's toolbar */

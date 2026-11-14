@@ -64,7 +64,23 @@ streamlit run app.py
   ESPN's market lines:
   * NBA, NCAAB, NFL: spread, total and moneyline.
   * NHL: puck line, total and moneyline.
-* **Player Props** has a card per player with headshot, projection, model line, last-5 average, last-5
+* **Top bar:** the SharpBoard mark and a sport dropdown pill (NBA, College Hoops, NFL, NHL, Soccer, UFC, Mixed
+  Parlays) on a pure-black, thin-bordered card design.
+* **Player Props pick list:** players ranked BET-first, each showing Over/Under, line, BET/PASS pill, edge
+  toward the pick and a confidence ring. Pick any player to open a full report:
+  * **Header:** breadcrumb, headshot, market vs opponent, and a big line number with L10 hit rate / Season /
+    vs-opponent stats.
+  * **Last-10 chart:** one bar per game (green over, pink under) against a dashed line marker, labelled with
+    opponent and date.
+  * **"Each split against the line":** season, last 10, vs tonight's opponent, tonight's venue,
+    back-to-backs, and without the key injured teammate (games that teammate missed).
+  * **Model report:**
+    * Recommendation and confidence ring (hit chance, last-10 consistency and split agreement; PASS picks
+      cap at 55).
+    * Projection with an edge bar.
+    * One-line summary and FORM / MATCHUP / RISK notes built from the numbers above.
+    * BET/PASS strip, alt-line ladder and latest news.
+* **Player Props** (legacy description) has a card per player with headshot, projection, model line, last-5 average, last-5
   chips, last-10 hit rate and an OVER/UNDER badge. Switching market or team redraws only the cards. Markets:
   * Basketball: PTS / REB / AST / PRA.
   * NFL: passing, rushing and receiving yards, and receptions.

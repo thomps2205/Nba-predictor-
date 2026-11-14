@@ -477,7 +477,8 @@ def parse_gamelog(raw: dict, kind: str, before: date) -> list[dict]:
                 if not eid or d is None or d >= before:
                     continue
                 stats = ev.get("stats") or []
-                row = {"eid": eid, "date": d, "opp": (m.get("opponent") or {}).get("abbreviation", "")}
+                row = {"eid": eid, "date": d, "opp": (m.get("opponent") or {}).get("abbreviation", ""),
+                       "away": str(m.get("atVs", "")).strip() == "@"}
                 for col, i in cols.items():
                     v = stats[i] if i is not None and i < len(stats) else None
                     row[col] = to_minutes(v) if col in ("MIN", "TOI") else (

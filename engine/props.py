@@ -104,14 +104,82 @@ def build_props(lg: League, game: dict, proj: dict, profiles: dict, base: dict, 
             players.append((a, logs, status, cls, season))
         team_pts = proj["pts_away"] if side == "away" else proj["pts_home"]
         is_b2b = team["id"] in b2b
-        common = {"Team": team["abbr"], "Opp": opp["abbr"], "TeamId": team["id"]}
+        common = {"Team": team["abbr"], "Opp": opp["abbr"], "TeamId": team["id"], "Home": side == "home",
+                  "TeamLogo": team.get("logo", ""), "OppName": opp.get("short") or opp["abbr"]}
         if lg.kind == "basketball":
-            rows += _basketball(lg, players, tp, op, base, proj, is_b2b, q_sit, common)
+            team_rows = _basketball(lg, players, tp, op, base, proj, is_b2b, q_sit, common)
         elif lg.kind == "football":
-            rows += _football(lg, players, op, base, team_pts, common)
+            team_rows = _football(lg, players, op, base, team_pts, common)
         elif lg.kind == "hockey":
-            rows += _hockey(lg, players, op, base, is_b2b, common)
+            team_rows = _hockey(lg, players, op, base, is_b2b, common)
+        else:
+            team_rows = []
+        _attach_splits(lg, team_rows, players, opp["abbr"], side == "home", is_b2b)
+        rows += team_rows
     return pd.DataFrame(rows)
+
+
+def stat_value(kind: str, m: str, g: dict) -> float:
+    """A market's value in one game-log row (PRA and hockey points are sums)."""
+    if kind == "basketball" and m == "PRA":
+        return g["PTS"] + g["REB"] + g["AST"]
+    if kind == "hockey" and m == "PTS":
+        return g["G"] + g["A"]
+    return float(g.get(m, 0.0))
+
+
+def _key_absence(lg: League, players: list) -> tuple[str, set] | None:
+    """Most important teammate who is OUT tonight and has played this season: (name, event ids played)."""
+    best, best_val = None, 0.0
+    stat = {"basketball": "PTS", "football": "REC", "hockey": "G"}.get(lg.kind, "PTS")
+    for a, logs, status, cls, _ in players:
+        if cls != "OUT" or len(logs) < 3:
+            continue
+        val = float(np.mean([r.get(stat, 0.0) for r in logs]))
+        if lg.kind == "football":
+            val = float(np.mean([r.get("PASS", 0) / 10 + r.get("RUSH", 0) + r.get("REC", 0) for r in logs]))
+        if val > best_val:
+            best, best_val = (a["name"], {r["eid"] for r in logs}), val
+    return best
+
+
+def _attach_splits(lg: League, team_rows: list[dict], players: list, opp_abbr: str, home_tonight: bool,
+                   b2b_tonight: bool) -> None:
+    """Per market: season, last 10, vs tonight's opponent, tonight's venue, back-to-backs and without the key
+    absent teammate — the "each split against the line" chart — plus last-10 game labels."""
+    logs_by_id = {a["id"]: logs for a, logs, *_ in players}
+    absent = _key_absence(lg, players)
+    for row in team_rows:
+        logs = logs_by_id.get(row["Id"]) or []
+        dates = sorted(r["date"] for r in logs)
+        b2b_days = {d for i, d in enumerate(dates) if i and (d - dates[i - 1]).days == 1}
+        row["G10"] = [{"opp": r.get("opp", ""), "date": f"{r['date'].month}/{r['date'].day}",
+                       "away": bool(r.get("away"))} for r in logs[:10]]
+        spl = {}
+        for m, _ in MARKETS.get(lg.kind, []):
+            vals = lambda rows: [stat_value(lg.kind, m, r) for r in rows]  # noqa: E731
+            out = []
+            if logs:
+                out.append(("Season average", float(np.mean(vals(logs))), len(logs)))
+                out.append(("Last 10 games", float(np.mean(vals(logs[:10]))), min(len(logs), 10)))
+            vs = [r for r in logs if r.get("opp") == opp_abbr]
+            if vs:
+                out.append((f"vs. {opp_abbr}", float(np.mean(vals(vs))), len(vs)))
+            venue = [r for r in logs if bool(r.get("away")) != home_tonight]
+            if len(venue) >= 2 and len(venue) < len(logs):
+                out.append(("Home games" if home_tonight else "Away games", float(np.mean(vals(venue))), len(venue)))
+            b2b = [r for r in logs if r["date"] in b2b_days]
+            if len(b2b) >= 2:
+                out.append(("On a back-to-back", float(np.mean(vals(b2b))), len(b2b)))
+            if absent and absent[0] != row["Player"]:
+                name, played = absent
+                first = min((r["date"] for r in logs if r["eid"] in played), default=None)
+                without = [r for r in logs if r["eid"] not in played and (first is None or r["date"] >= first)]
+                if len(without) >= 2:
+                    out.append((f"Without {name}", float(np.mean(vals(without))), len(without)))
+            spl[m] = out
+        row["SPL"] = spl
+        row["B2BTonight"] = b2b_tonight
 
 
 def _base_row(lg: League, a: dict, status: str, cls: str, common: dict) -> dict:
