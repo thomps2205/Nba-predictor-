@@ -617,7 +617,8 @@ def render_soccer() -> None:
     with tab_p:
         legs = []
         for k, sl in slates.items():
-            legs += parlays.game_legs(k, "soccer", [g for g in games if g["league"] == k], sl["projections"])
+            legs += parlays.game_legs(k, "soccer", [g for g in games if g["league"] == k and not_started(g)],
+                                      sl["projections"])
         note("Soccer legs: match result (home / draw / away, priced from ESPN's three-way odds) and goal totals at "
              "-110. Hit chances blend the model (60%) with the market (40%). One leg per match. Not betting advice.")
         render_parlays(legs)
@@ -1252,31 +1253,82 @@ def gather_prop_legs(sk: str, games: list[dict], slate: dict, inj: list[dict], l
 
 
 @st.fragment
+def not_started(g: dict) -> bool:
+    """Pregame and tip-off still in the future (ESPN can lag a few minutes flipping the state)."""
+    if g["state"] != "pre":
+        return False
+    return g["tip"] is None or g["tip"].to_pydatetime() > datetime.now(ET)
+
+
+def upcoming_games(sk: str, days: int = 3, cap: int = 16) -> list[dict]:
+    """Games that haven't started in the next `days` days (today included), soonest first."""
+    lg_ = LEAGUES[sk]
+    games = espn.week_games(lg_, today_et, days, today_et)
+    if sk == "NCAAB":  # D1 has hundreds of games: keep parlays to ranked matchups
+        games = [g for g in games if g["home"]["rank"] or g["away"]["rank"]]
+    games = [g for g in games if not_started(g)]
+    games.sort(key=lambda g: (g["tip"] is None, g["tip"] or 0))
+    return games[:cap]
+
+
+PARLAY_WINDOWS = ["Not started (this slate)", "Next 3 days"]
+
+
+@st.fragment
 def parlay_fragment(games: list[dict], slate: dict, inj: list[dict]) -> None:
+    pending = [g for g in games if not_started(g)]
+    default = PARLAY_WINDOWS[0] if pending else PARLAY_WINDOWS[1]
+    win = st.segmented_control("Parlay window", PARLAY_WINDOWS, default=default, key=f"plwin_{sport}",
+                               label_visibility="collapsed", width="stretch") or default
+    if win == PARLAY_WINDOWS[1]:
+        with st.spinner("Loading upcoming games…"):
+            gs = upcoming_games(sport)
+        if not pending and gs:
+            note("Every game on this slate has started — building parlays from upcoming games instead.")
+        if gs:
+            sl, inj2 = load_team_data(sport, gs)
+        else:
+            sl, inj2 = {"projections": {}, "profiles": {}, "base": {}, "b2b": set()}, []
+    else:
+        gs, sl, inj2 = pending, slate, inj
+    if not gs:
+        empty_card("No games left to start in this window.",
+                   "Switch to Next 3 days to build parlays from upcoming games.")
+        return
+    first, last = min((g["tip"] for g in gs if g["tip"] is not None), default=None), \
+        max((g["tip"] for g in gs if g["tip"] is not None), default=None)
+    span = (f"{first:%a %-I:%M %p} – {last:%a %-I:%M %p} ET" if first is not None and last is not None else "")
+    H(f'<div class="note"><b>{len(gs)}</b> game{"s" if len(gs) != 1 else ""} not started yet'
+      + (f" · {esc(span)}" if span else "") + "</div>")
     load_all = st.toggle("Scan player props in every game (default: the next 4 games; slower the first time)",
                          key=f"pl_props_{sport}")
-    legs = parlays.game_legs(sport, lg.kind, games, slate["projections"])
-    legs += gather_prop_legs(sport, games, slate, inj, load_all)
-    note("Each leg's hit chance blends the model (60%) with the market (40%). Prices: ESPN moneylines, -110 "
-         "spreads/totals, -115 props. Props use the PrizePicks / Underdog line when posted, otherwise the player's "
-         "last-10 average as the line. One leg per game; real parlay odds may differ. Not betting advice.")
+    legs = parlays.game_legs(sport, lg.kind, gs, sl["projections"])
+    legs += gather_prop_legs(sport, gs, sl, inj2, load_all)
+    note("Only games that haven't started. Each leg's hit chance blends the model (60%) with the market (40%). "
+         "Prices: ESPN moneylines, -110 spreads/totals, real prop prices when posted (else -115). Props without a "
+         "posted line use the implied line. One leg per game; real parlay odds may differ. Not betting advice.")
     render_parlays(legs)
 
 
 def render_mixed() -> None:
     hero(f"{today_et:%a, %b %d}<br>All sports")
+    mix_win = st.segmented_control("Parlay window", ["Today", "Next 3 days"], default="Today", key="mix_window",
+                                   label_visibility="collapsed", width="stretch") or "Today"
     load_all = st.toggle("Scan player props in every game (default: next 2 games per sport; slower first time)",
                          key="mix_props")
     legs, coverage = [], []
     for sk in ("NBA", "NCAAB", "NFL", "NHL"):
         try:
             with st.spinner(f"Loading {sk}…"):
-                games = fetch_games(sk, today_et)
-            if sk == "NFL":
-                games = [g for g in games if g["date"] and 0 <= (g["date"] - today_et).days <= 3]
-            elif sk == "NCAAB":
-                games = [g for g in games if g["home"]["rank"] or g["away"]["rank"]]
-            games = [g for g in games if g["state"] == "pre"][:PAGE_SIZE]
+                if mix_win == "Next 3 days":
+                    games = upcoming_games(sk, 3, PAGE_SIZE)
+                else:
+                    games = fetch_games(sk, today_et)
+                    if sk == "NFL":
+                        games = [g for g in games if g["date"] and 0 <= (g["date"] - today_et).days <= 3]
+                    elif sk == "NCAAB":
+                        games = [g for g in games if g["home"]["rank"] or g["away"]["rank"]]
+                    games = [g for g in games if not_started(g)][:PAGE_SIZE]
             if not games:
                 coverage.append(f"{sk}: no upcoming games")
                 continue
@@ -1291,7 +1343,9 @@ def render_mixed() -> None:
         soc_games, soc_legs = 0, 0
         for k in espn.SOCCER_DEFAULT:
             try:
-                gs = [g for g in fetch_games(k, today_et) if g["state"] == "pre"][:PAGE_SIZE]
+                gs = ([g for g in espn.week_games(LEAGUES[k], today_et, 3, today_et) if not_started(g)]
+                  if mix_win == "Next 3 days" else
+                  [g for g in fetch_games(k, today_et) if not_started(g)])[:PAGE_SIZE]
             except Exception:
                 continue
             if not gs:
@@ -1301,7 +1355,8 @@ def render_mixed() -> None:
             legs += lk
             soc_games, soc_legs = soc_games + len(gs), soc_legs + len(lk)
         coverage.append(f"Soccer: {soc_games} match{'es' if soc_games != 1 else ''} · {soc_legs} legs"
-                        if soc_games else "Soccer: no matches today in the top leagues")
+                        if soc_games else ("Soccer: no upcoming matches in the top leagues" if mix_win != "Today"
+                                           else "Soccer: no matches left today in the top leagues"))
     except Exception as e:
         coverage.append(f"Soccer: unavailable ({type(e).__name__})")
     try:

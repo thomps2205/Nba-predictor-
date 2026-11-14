@@ -85,6 +85,7 @@ streamlit run app.py
   * Basketball: PTS / REB / AST / PRA.
   * NFL: passing, rushing and receiving yards, and receptions.
   * NHL: goals (with anytime-goal %), assists, shots and points.
+* **Parlays only use games that haven't started** (pregame state and tip-off still in the future). A window toggle switches between the selected slate's remaining games and the next 3 days; when the slate has already tipped off, the tab switches to upcoming games automatically. MIX has the same Today / Next 3 days toggle.
 * **Parlays** appear as a tab in every sport, plus a **MIX** view in the sport switcher that combines today's
   legs from all five sports.
   * Each leg's hit chance blends the model (60%) with the market's no-vig probability (40%). Spreads, totals
