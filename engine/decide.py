@@ -79,11 +79,38 @@ def verdict(bet: bool, reason: str, pick: str = "", p: float | None = None, edge
     return {"verdict": "BET" if bet else "PASS", "reason": reason, "pick": pick, "p": p, "edge": edge}
 
 
+def _be(american: float | None, default: float) -> float:
+    if american is None:
+        return default
+    return 100 / (american + 100) if american > 0 else -american / (-american + 100)
+
+
+def no_line_verdict(kind: str, m: str, label: str, proj: float, line: float, hist: list[float],
+                    season: float | None) -> dict:
+    """No sportsbook line posted: show the model's lean against a season-average line instead of BET/PASS."""
+    over = proj > line
+    p_over = prop_p_over(kind, m, proj, hist, line)
+    p = p_over if over else 1 - p_over
+    gap = abs(proj - line)
+    thr = PROP_EDGE.get(kind, {}).get(m, 1.0)
+    unit = UNIT.get(m, "")
+    base = f"season avg {season:.1f}" if season is not None else "recent average"
+    if gap < 0.5 * thr:
+        reason = f"No sportsbook line — no clear lean (proj {proj:.1f} vs {base})"
+        pick = ""
+    else:
+        reason = f"No sportsbook line — model leans {'Over' if over else 'Under'} ({gap:.1f} {unit} vs {base})"
+        pick = f"Lean {'Over' if over else 'Under'} {line:g} {label}"
+    return {"verdict": "NO LINE", "reason": reason, "pick": pick, "p": p, "edge": f"{gap:.1f} {unit}",
+            "lean": gap >= 0.5 * thr}
+
+
 # --------------------------------------------------------------------------
 # Player props
 # --------------------------------------------------------------------------
 def prop_decision(kind: str, m: str, label: str, proj: float, line: float, hist: list[float], posted: bool,
-                  status_cls: str = "ACTIVE") -> dict:
+                  status_cls: str = "ACTIVE", over_price: float | None = None,
+                  under_price: float | None = None) -> dict:
     over = proj > line
     p_over = prop_p_over(kind, m, proj, hist, line)
     p = p_over if over else 1 - p_over
@@ -92,7 +119,8 @@ def prop_decision(kind: str, m: str, label: str, proj: float, line: float, hist:
     gap = abs(proj - line)
     thr = PROP_EDGE.get(kind, {}).get(m, 1.0)
     hit = _hit(hist, line, over)
-    pp = p - BE_PROP
+    be = _be(over_price if over else under_price, BE_PROP)  # real price when ESPN lists one
+    pp = p - be
     unit = UNIT.get(m, "")
     edge_txt = f"{gap:.1f} {unit} edge · {p * 100:.0f}% to hit"
     if status_cls == "Q":

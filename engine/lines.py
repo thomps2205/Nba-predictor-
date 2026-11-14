@@ -104,3 +104,90 @@ def book_lines(lg: League) -> dict[tuple[str, str], tuple[float, str]]:
     for k, v in _underdog(lg).items():
         out.setdefault(k, (v, "Underdog"))
     return out
+
+
+# --------------------------------------------------------------------------
+# ESPN sportsbook prop bets (core API): real lines AND prices, matched by athlete id
+# --------------------------------------------------------------------------
+CORE = "https://sports.core.api.espn.com/v2/sports"
+ESPN_PROP_MAP = {
+    "basketball": {"points": "PTS", "total points": "PTS", "rebounds": "REB", "total rebounds": "REB",
+                   "assists": "AST", "total assists": "AST", "points + rebounds + assists": "PRA",
+                   "points, rebounds & assists": "PRA", "pts + reb + ast": "PRA", "total points, rebounds & assists": "PRA"},
+    "football": {"passing yards": "PASS", "total passing yards": "PASS", "rushing yards": "RUSH",
+                 "total rushing yards": "RUSH", "receiving yards": "REC", "total receiving yards": "REC",
+                 "receptions": "RECS", "total receptions": "RECS"},
+    "hockey": {"goals": "G", "total goals": "G", "assists": "A", "total assists": "A", "shots on goal": "SOG",
+               "total shots on goal": "SOG", "points": "PTS", "total points": "PTS"},
+}
+
+
+def _american(v):
+    if isinstance(v, dict):
+        v = v.get("american", v.get("value", v.get("displayValue")))
+    try:
+        f = float(str(v).replace("+", ""))
+        return f if abs(f) >= 100 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _espn_prop_fetch(lg: League, event_id: str) -> dict:
+    base = f"{CORE}/{lg.sport}/leagues/{lg.league}/events/{event_id}/competitions/{event_id}/odds"
+    odds = http_json(base, {"lang": "en", "region": "us", "limit": "50"}, retries=1)
+    providers = []
+    for it in odds.get("items", []) or []:
+        pid = str(((it.get("provider") or {}).get("id")) or "")
+        if not pid:
+            import re as _re
+            m = _re.search(r"/odds/(\d+)", str(it.get("$ref", "")))
+            pid = m.group(1) if m else ""
+        if pid and pid not in providers:
+            providers.append(pid)
+    for pid in providers or ["58", "40", "100"]:
+        try:
+            raw = http_json(f"{base}/{pid}/propBets", {"lang": "en", "region": "us", "limit": "1000"}, retries=1)
+        except Exception:
+            continue
+        if raw.get("items"):
+            raw["_provider"] = pid
+            return raw
+    return {"items": []}
+
+
+def espn_props(lg: League, event_id: str) -> dict:
+    """{("id:<athleteId>", market): (line, "ESPN odds", over_american, under_american)} for one game."""
+    import re as _re
+
+    if lg.kind not in ESPN_PROP_MAP or flag_active(f"espnprops_down_{lg.key}.flag", DOWN_TTL):
+        return {}
+    try:
+        raw = disk_cached(f"espnprops|{lg.key}|{event_id}", TTL_LINES, lambda: _espn_prop_fetch(lg, event_id))
+    except Exception:
+        set_flag(f"espnprops_down_{lg.key}.flag")
+        return {}
+    out: dict = {}
+    for it in raw.get("items", []) or []:
+        m = _re.search(r"/athletes/(\d+)", str((it.get("athlete") or {}).get("$ref", "")) or "")
+        aid = m.group(1) if m else str((it.get("athlete") or {}).get("id", ""))
+        name = str(((it.get("type") or {}).get("name")) or it.get("name") or "").lower().strip()
+        mk = ESPN_PROP_MAP[lg.kind].get(name)
+        if not aid or not mk:
+            continue
+        cur = it.get("current") or {}
+        odds = it.get("odds") or {}
+        line = num((cur.get("target") or {}).get("value", (cur.get("target") or {}).get("displayValue")),
+                   default=float("nan"))
+        if line != line:
+            line = num((odds.get("total") or {}).get("value", it.get("line")), default=float("nan"))
+        if line != line:
+            continue
+        over = _american(cur.get("over") or odds.get("over"))
+        under = _american(cur.get("under") or odds.get("under"))
+        out.setdefault((f"id:{aid}", mk), (line, "ESPN odds", over, under))
+    return out
+
+
+def lookup(book: dict, athlete_id: str, name: str, m: str):
+    """Line for a player/market: ESPN (by athlete id, with prices) first, then PrizePicks / Underdog by name."""
+    return book.get((f"id:{athlete_id}", m)) or book.get((norm_name(name), m))

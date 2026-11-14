@@ -193,6 +193,11 @@ def cached_lines(lg_key: str, tick: int) -> dict:
     return linesmod.book_lines(LEAGUES[lg_key])
 
 
+@st.cache_data(ttl=300, show_spinner=False, max_entries=64)
+def cached_espn_props(lg_key: str, game_id: str, tick: int) -> dict:
+    return linesmod.espn_props(LEAGUES[lg_key], game_id)
+
+
 @st.cache_data(ttl=300, show_spinner=False, max_entries=32)
 def cached_news(lg_key: str, team_ids: tuple, tick: int) -> list[dict]:
     return newsmod.articles(LEAGUES[lg_key], team_ids)
@@ -598,15 +603,24 @@ def prop_line_info(r: dict, m: str, label: str, kind: str, book: tuple | None, t
     for the selected tier, the BET/PASS verdict for the shown line, and the full alt ladder."""
     hist = r.get(f"V10_{m}") or []
     proj = r[f"P_{m}"]
+    over_p = book[2] if book and len(book) > 2 else None
+    under_p = book[3] if book and len(book) > 3 else None
+    season = next((s_[1] for s_ in (r.get("SPL") or {}).get(m, []) if s_[0] == "Season average"), None)
     if book:
         main, src, posted = book[0], book[1], True
+    elif season is not None and len(hist) >= 5:  # no sportsbook line: season average as the reference line
+        main, src, posted = (0.5 if (kind, m) in parlays.COUNT_LINE else round(season - 0.5) + 0.5), \
+            "Est. line (season avg)", False
     else:
         est = parlays._proxy_line(kind, m, hist)
         main, src, posted = (est, "Est. line", False) if est is not None else (r[f"L_{m}"], "Model line", False)
     ladder = decide.prop_alt_ladder(kind, m, proj, hist, main)
     line = decide.shift_line(kind, m, main, tier)
-    if line == main:
-        v = decide.prop_decision(kind, m, label, proj, line, hist, posted, r.get("Class", "ACTIVE"))
+    if line == main and posted:
+        v = decide.prop_decision(kind, m, label, proj, line, hist, posted, r.get("Class", "ACTIVE"), over_p, under_p)
+        shown = src if over_p is None else f"{src} {'O' if proj > line else 'U'} {(over_p if proj > line else under_p) or 0:+.0f}"
+    elif line == main:
+        v = decide.no_line_verdict(kind, m, label, proj, line, hist, season)
         shown = src
     else:
         row = next((x for x in ladder if abs(x["line"] - line) < 1e-9), None)
@@ -787,7 +801,7 @@ def props_fragment(games: list[dict], slate: dict, inj: list[dict]) -> None:
     df = compute_props(lg.key, gid, float(q_sit), bucket(), g, slate["projections"][gid], slate["profiles"],
                        slate["base"], slate["b2b"], inj)
     with st.spinner("Checking sportsbook lines and news…"):
-        book = cached_lines(lg.key, bucket(5))
+        book = {**cached_lines(lg.key, bucket(5)), **cached_espn_props(lg.key, gid, bucket(5))}
         arts = cached_news(lg.key, (g["away"]["id"], g["home"]["id"]), bucket(5))
     markets = propmod.MARKETS[kind]
     mlabels = dict(markets)
@@ -806,13 +820,13 @@ def props_fragment(games: list[dict], slate: dict, inj: list[dict]) -> None:
     if up_only and tier < 0:  # goals / assists / points ladders start at 0.5
         note(f"{mlabels[m]} lines start at 0.5, so only the + alt tiers apply — showing the main line.")
         tier = 0
-    n_book = sum(1 for (_, mm) in book if mm == m)
-    note((f"Line = live PrizePicks / Underdog line where posted ({n_book} {mlabels[m]} lines on the board), "
-          "otherwise an estimated line from the player's last-10 average. " if n_book else
-          "No PrizePicks / Underdog lines found right now, so each card uses an estimated line (last-10 "
-          "average). ")
-         + "🟢 BET = edge clears the market threshold and ≥ 2pp over -115 break-even; 🟡 PASS otherwise. "
-           "Chips = last 5 games, green when over the line.")
+    n_espn = sum(1 for k in book if k[1] == m and str(k[0]).startswith("id:"))
+    n_book = sum(1 for k in book if k[1] == m)
+    note((f"Lines: {n_book} {mlabels[m]} lines found ({n_espn} from ESPN's sportsbook feed with prices, the rest "
+          "from PrizePicks / Underdog). " if n_book else
+          "No sportsbook lines found for this game yet (ESPN, PrizePicks and Underdog). ")
+         + "🟢 BET / 🟡 PASS are judged against a real line and its price. ⚪ NO LINE = no sportsbook line: the "
+           "card shows the model's lean against the player's season average instead.")
     if df.empty:
         empty_card("No players with recent game logs for this matchup yet.")
         return
@@ -826,14 +840,17 @@ def props_fragment(games: list[dict], slate: dict, inj: list[dict]) -> None:
         return
     recs = df.to_dict("records")
     for r in recs:
-        r["_info"] = prop_line_info(r, m, mlabels[m], kind, book.get((norm_name(r["Player"]), m)), tier)
+        r["_info"] = prop_line_info(r, m, mlabels[m], kind, linesmod.lookup(book, r["Id"], r["Player"], m), tier)
         r["_e"] = abs(r[f"P_{m}"] - r["_info"]["line"])
     # BET cards first, then posted lines, then biggest edges
     for r in recs:
         r["_conf"] = report.confidence(r, m, r["_info"])
-    recs.sort(key=lambda r: (r["_info"]["verdict"]["verdict"] != "BET", -r["_conf"], -r["_e"]))
-    n_bet = sum(r["_info"]["verdict"]["verdict"] == "BET" for r in recs)
-    H(f'<div class="note"><b>{n_bet}</b> BET · <b>{len(recs) - n_bet}</b> PASS on {esc(mlabels[m])}'
+    rank = {"BET": 0, "NO LINE": 1, "PASS": 2}
+    recs.sort(key=lambda r: (rank.get(r["_info"]["verdict"]["verdict"], 3),
+                             not r["_info"]["verdict"].get("lean", True), -r["_conf"], -r["_e"]))
+    cnt = {k: sum(r["_info"]["verdict"]["verdict"] == k for r in recs) for k in rank}
+    H(f'<div class="note"><b>{cnt["BET"]}</b> BET · <b>{cnt["PASS"]}</b> PASS · <b>{cnt["NO LINE"]}</b> no line '
+      f'on {esc(mlabels[m])}'
       + (f" at {esc(tier_lbl[tier])}" if tier else "") + " · tap a player below for the full report</div>")
     H('<div class="pklist">' + "".join(report.pick_row(r, m, mlabels[m], r["_info"], r["_conf"]) for r in recs)
       + "</div>")
@@ -1174,7 +1191,8 @@ def gather_prop_legs(sk: str, games: list[dict], slate: dict, inj: list[dict], l
         try:
             df = compute_props(sk, g["id"], float(q_sit), bucket(), g, slate["projections"][g["id"]],
                                slate["profiles"], slate["base"], slate["b2b"], inj)
-            legs += parlays.prop_legs(sk, lg_.kind, g, df, book, norm_name, labels)
+            book_g = {**book, **cached_espn_props(sk, g["id"], bucket(5))}
+            legs += parlays.prop_legs(sk, lg_.kind, g, df, book_g, norm_name, labels)
         except Exception as e:
             NOTES[f"prop legs {sk}"] = f"{sk} prop legs skipped for a game ({type(e).__name__})."
     return legs

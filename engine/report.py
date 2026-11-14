@@ -36,7 +36,7 @@ justify-content:center;color:var(--muted);font-weight:800}
 .rp-stats{display:flex;gap:14px;text-align:center}
 .rp-stats .k{color:var(--muted);font-size:.72rem}
 .rp-stats .v{font-size:1.25rem;font-weight:700;margin-top:4px;font-variant-numeric:tabular-nums}
-.pos{color:var(--green)}.neg{color:var(--pink)}.amb{color:var(--amber)}
+.pos{color:var(--green)}.neg{color:var(--pink)}.amb{color:var(--amber)}.mut{color:var(--muted)}
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 /* last-10 bars */
 .bars{position:relative;background:#08090b;border:1px solid var(--line);border-radius:16px;padding:14px 8px 8px;margin-top:14px}
@@ -152,11 +152,13 @@ def pick_row(r: dict, m: str, label: str, info: dict, conf: int) -> str:
     edge = r[f"P_{m}"] - line
     side = "Over" if over else "Under"
     vb = info["verdict"]["verdict"]
-    pill = f'<span class="vpill {"bet" if vb == "BET" else "pass"} sm">{"🟢" if vb == "BET" else "🟡"} {vb}</span>'
+    cls, ic = {"BET": ("bet", "🟢"), "NO LINE": ("noline", "⚪")}.get(vb, ("pass", "🟡"))
+    pill = f'<span class="vpill {cls} sm">{ic} {vb}</span>'
     return (f'<div class="pk">{_shot(r["Headshot"], r["Player"], "shot")}<div class="mid">'
             f'<div class="nm">{esc(r["Player"])}</div><div class="rec"><b class="{"pos" if over else "neg"}">{side}</b> '
             f'{line:g} {esc(label)} {pill}</div></div>'
-            f'<div class="ed {"pos" if vb == "BET" else "amb"}">+{abs(edge):.1f} edge</div>{ring(conf, True)}</div>')
+            f'<div class="ed {"pos" if vb == "BET" else "amb" if vb == "PASS" else "mut"}">+{abs(edge):.1f} edge</div>'
+            f'{ring(conf, True)}</div>')
 
 
 def _fmt(v: float, small: bool) -> str:

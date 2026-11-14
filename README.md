@@ -22,7 +22,7 @@ Three outside sources add information ESPN doesn't have:
 
 | Extra data | Source | Fallback |
 |---|---|---|
-| Live player prop lines | PrizePicks board (`api.prizepicks.com/projections`) | Underdog Fantasy (`api.underdogfantasy.com/beta/v5/over_under_lines`) |
+| Live player prop lines + prices | ESPN sportsbook prop bets (`sports.core.api.espn.com/…/competitions/{id}/odds/{provider}/propBets`, matched by athlete id) | PrizePicks board, then Underdog Fantasy |
 | Official UFC fighter stats and win methods | UFCStats.com search + fighter-details pages | ESPN fighter stats |
 | Latest player news | ESPN news feeds (`…/{league}/news`, league-wide and per team), matched by athlete ID | — |
 
@@ -133,6 +133,8 @@ streamlit run app.py
     both teams to score.
   * **Breakdown drawer:** every matchup card has a collapsible "Period & Half Breakdown" with all segments
     at a glance. These are model prices only, since ESPN doesn't publish period odds.
+* **No line, no verdict:** a prop without any sportsbook line shows ⚪ NO LINE with the model's lean against the
+  player's season average, instead of a PASS judged against an estimate of itself.
 * **BET / PASS decisions:** every game card, player-prop card, alt line and UFC bout shows 🟢 BET or 🟡 PASS
   with the reason.
   * **BET** needs the model's edge to clear the market threshold and the hit chance to be ≥ 2 percentage

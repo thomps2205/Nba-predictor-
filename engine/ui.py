@@ -84,6 +84,8 @@ letter-spacing:.04em;white-space:nowrap}
 .vpill.bet{background:var(--green);color:#04210f}
 .vpill.pass{background:var(--amber);color:#2a1a02}
 .vpill.sm{font-size:.6rem;padding:2px 6px}
+.vpill.noline{background:#2a2c33;color:#d5d8de}
+.verdict.noline{background:rgba(148,155,168,.08);border:1px solid #2f3138}
 .lad-title{font-size:.7rem;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;
 margin:10px 0 5px}
 .ladtab{border:1px solid var(--line);border-radius:10px;overflow:hidden}
@@ -286,7 +288,7 @@ def verdict_html(v: dict | None, compact: bool = False) -> str:
     if not v:
         return ""
     bet = v["verdict"] == "BET"
-    icon, cls = ("🟢", "bet") if bet else ("🟡", "pass")
+    icon, cls = ("🟢", "bet") if bet else (("⚪", "noline") if v["verdict"] == "NO LINE" else ("🟡", "pass"))
     pick = f'<b>{esc(v["pick"])}</b>' if v.get("pick") else ""
     if compact:
         return f'<span class="vpill {cls}">{icon} {v["verdict"]}</span>'

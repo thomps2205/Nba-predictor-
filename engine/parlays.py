@@ -187,10 +187,13 @@ def prop_legs(sport: str, kind: str, game: dict, df, book: dict, norm_name, labe
         for m in labels:
             if f"P_{m}" not in r:
                 continue
-            b = book.get((norm_name(r["Player"]), m))
+            b = book.get((f"id:{r.get('Id', '')}", m)) or book.get((norm_name(r["Player"]), m))
+            price = None
             if b:
-                line, src = b
+                line, src = b[0], b[1]
                 src_txt = f"{src} line"
+                if len(b) > 3:
+                    price = (b[2], b[3])
             else:
                 line = _proxy_line(kind, m, r.get(f"V10_{m}") or [])
                 if line is None:
@@ -204,10 +207,12 @@ def prop_legs(sport: str, kind: str, game: dict, df, book: dict, norm_name, labe
                 sd = max(float(np.std(hist)) if len(hist) >= 4 else 0.0, PROP_SD_FLOOR.get(m, 0.25 * proj), 0.2 * proj)
                 p_over = 1 - norm_cdf((line - proj) / sd)
             side, prob = ("Over", p_over) if p_over >= 0.5 else ("Under", 1 - p_over)
+            am = (price[0] if side == "Over" else price[1]) if price else None
+            leg_dec = american_to_dec(am) or PROP_DEC
             if side == "Under" and (kind, m) in COUNT_LINE:
                 continue  # "under 0.5 goals" is a heavy favorite at real books, never a -115 pick
             legs.append(Leg(sport, game["id"], matchup, f'{r["Player"]} {side} {line:g} {labels[m]}', "Prop", prob,
-                            PROP_DEC, when, note=f"{src_txt} · model {proj:.1f}", mkt=0.5,
+                            leg_dec, when, note=f"{src_txt} · model {proj:.1f}", mkt=0.5,
                             logo=team.get("logo", ""), fallback=r.get("Team", "")))
     return legs
 
