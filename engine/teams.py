@@ -227,6 +227,7 @@ def period_projection(lg: League, proj: dict, ph: dict, pa_: dict, idx: list[int
     sh_a = 0.5 * share(pa_["per_for"], ga) + 0.5 * share(ph["per_against"], gh)
     lh, la = proj["pts_home"] * sh_h, proj["pts_away"] * sh_a
     out = {"pts_home": lh, "pts_away": la, "total": lh + la, "spread_home": -(lh - la),
+           "share": 0.5 * (sh_h + sh_a),  # segment's share of full-game scoring (for implied market lines)
            "real": min(ph.get("ls_real", 0), pa_.get("ls_real", 0)), "games": min(ph.get("ls_games", 0),
                                                                                    pa_.get("ls_games", 0))}
     if lg.kind in ("hockey", "soccer"):

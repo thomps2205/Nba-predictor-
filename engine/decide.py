@@ -257,7 +257,7 @@ def game_decision(lg_key: str, kind: str, g: dict, p: dict, team_gp: int) -> dic
         best = max(bets, key=lambda c: c[1])
         return verdict(True, best[4], best[2], best[3], best[4])
     best = max(cands, key=lambda c: c[1])
-    return verdict(False, best[5], best[2], best[3], best[4])
+    return verdict(False, f"{best[5]} ({best[4]})", best[2], best[3], best[4])
 
 
 def game_alt_ladders(lg_key: str, kind: str, g: dict, p: dict) -> dict:
@@ -316,3 +316,58 @@ def fight_decision(name: str, p: float, ml: float | None, model_only: float) -> 
                        f"{pp * 100:+.0f}pp")
     reason = "High model/market disagreement" if abs(model_only - p) >= 0.25 else "Thin edge"
     return verdict(False, reason, f"{name} to win", p, f"{pp * 100:+.0f}pp")
+
+
+# --------------------------------------------------------------------------
+# Quarter / half / period: implied market lines from the full-game line
+# --------------------------------------------------------------------------
+def implied_period_lines(odds: dict, share: float) -> dict:
+    """ESPN only posts full-game lines. Scale them by the segment's share of full-game scoring (from both
+    teams' real period splits): e.g. FG total 224.0 x 0.51 = implied 1H total 114.2."""
+    out = {"total": None, "spread_home": None, "share": share}
+    if odds.get("total") is not None:
+        out["total"] = odds["total"] * share
+    if odds.get("spread_home") is not None:
+        out["spread_home"] = odds["spread_home"] * share
+    return out
+
+
+def period_decision(lg_key: str, kind: str, g: dict, q: dict, imp: dict, seg: str) -> dict:
+    """BET / PASS for a segment against its implied market line (priced at the standard -110)."""
+    share = max(imp.get("share") or 0.25, 0.1)
+    h, a = g["home"]["abbr"], g["away"]["abbr"]
+    thr = GAME_EDGE.get(kind, 2.0) * math.sqrt(share)
+    goals = kind in ("hockey", "soccer")
+    cands = []
+    if imp.get("spread_home") is not None and not goals:
+        s = imp["spread_home"]
+        mu = q["pts_home"] - q["pts_away"]
+        sd = MARGIN_SD.get(lg_key, 12.0) * math.sqrt(share)
+        p_h = 1 - norm_cdf((-s - mu) / sd)
+        gap = mu + s
+        home = gap > 0
+        pc = p_h if home else 1 - p_h
+        pick = f"{seg} {h} {s:+.1f}" if home else f"{seg} {a} {-s:+.1f}"
+        cands.append((abs(gap) >= thr and pc - BE_STD >= PP_EDGE, pc - BE_STD, pick, pc,
+                      f"+{abs(gap):.1f} pts vs implied spread · {pc * 100:.0f}% to cover"))
+    if imp.get("total") is not None:
+        t = imp["total"]
+        if goals:
+            po = sum(qq for i, j, qq in _poisson_grid(q["pts_home"], q["pts_away"]) if i + j > t)
+        else:
+            sd = TOTAL_SD.get(lg_key, 13.0) * math.sqrt(share)
+            po = 1 - norm_cdf((t - q["total"]) / sd)
+        over = q["total"] > t
+        pc = po if over else 1 - po
+        gap = abs(q["total"] - t)
+        unit = "goals" if goals else "pts"
+        cands.append((gap >= (0.3 * math.sqrt(share) if goals else thr) and pc - BE_STD >= PP_EDGE, pc - BE_STD,
+                      f'{seg} {"Over" if over else "Under"} {t:.1f}', pc,
+                      f"+{gap:.1f} {unit} vs implied total · {pc * 100:.0f}% to hit"))
+    if not cands:
+        return verdict(False, f"No full-game line to derive {seg} markets from")
+    bets = [c for c in cands if c[0]]
+    best = max(bets or cands, key=lambda c: c[1])
+    if bets:
+        return verdict(True, best[4] + " (implied line, -110)", best[2], best[3], best[4])
+    return verdict(False, f"Thin edge ({best[4]})", best[2], best[3], best[4])

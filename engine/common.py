@@ -112,6 +112,10 @@ def disk_cached(key: str, ttl: float, fetch):
     return data
 
 
+def cache_write(key: str, data) -> None:
+    _cache_write(key, data)
+
+
 def clear_disk_cache() -> None:
     for pattern in ("*.json", "*.flag", "*.tmp"):
         for p in CACHE_DIR.glob(pattern):

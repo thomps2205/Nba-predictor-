@@ -12,6 +12,7 @@ Run:  streamlit run app.py
 from __future__ import annotations
 
 import importlib
+import math
 import os
 import time
 from datetime import date, datetime, timedelta
@@ -245,6 +246,7 @@ def matchup_card(g: dict, p: dict | None, b2b: set[str], kind: str, badge: str =
              f'<div class="{fav_cls_h}" style="width:{hp:.0f}%"></div></div>'
              f'<div class="winlbl"><span>{esc(a["abbr"])} {100 - hp:.0f}%</span><span>{esc(h["abbr"])} {hp:.0f}%</span></div>')
     o = g["odds"]
+    mkl = "Closing Mkt" if o.get("closing") else "Mkt"
     fav = h if hp >= 50 else a
     if kind == "hockey":
         # P(favorite wins by 2+ in regulation), from the Poisson grid
@@ -260,19 +262,19 @@ def matchup_card(g: dict, p: dict | None, b2b: set[str], kind: str, badge: str =
         sp = p["spread_home"]
         fav_txt = "PK" if abs(sp) < 0.25 else (f'{h["abbr"]} -{abs(sp):.1f}' if sp < 0 else f'{a["abbr"]} -{abs(sp):.1f}')
         box1 = (f'<div class="mkt"><span class="lbl">Spread</span><div class="val">{esc(fav_txt)}</div>'
-                f'<div class="sub">Mkt {esc(o["details"] or "—")}</div>{s_badge}</div>')
+                f'<div class="sub">{mkl} {esc(o["details"] or (fmt_spread(o["spread_home"]) if o["spread_home"] is not None else "—"))}</div>{s_badge}</div>')
         t_lean, t_strong = (2.0, 5.0) if kind == "basketball" else (1.5, 3.5)
     t_edge = (p["total"] - o["total"]) if o["total"] is not None else None
     t_badge = edge_badge(t_edge, t_lean, t_strong, f'OVER {o["total"]}' if o["total"] else "",
                          f'UNDER {o["total"]}' if o["total"] else "", neg_is_red=True)
     box2 = (f'<div class="mkt"><span class="lbl">Total</span><div class="val">{p["total"]:.1f}</div>'
-            f'<div class="sub">Mkt {esc(str(o["total"]) if o["total"] is not None else "—")}</div>{t_badge}</div>')
+            f'<div class="sub">{mkl} {esc(str(o["total"]) if o["total"] is not None else "—")}</div>{t_badge}</div>')
     mh, ma = ml_to_prob(o["ml_home"]), ml_to_prob(o["ml_away"])
     if mh and ma:
         mkt_h = mh / (mh + ma)  # vig-free
         ml_badge = edge_badge((p["home_win_prob"] - mkt_h) * 100, 3, 7, f'{h["abbr"]} ML', f'{a["abbr"]} ML',
                               fmt="{:.0f}%")
-        ml_sub = f'Mkt {fav["abbr"]} {(mkt_h if fav is h else 1 - mkt_h) * 100:.0f}%'
+        ml_sub = f'{mkl} {fav["abbr"]} {(mkt_h if fav is h else 1 - mkt_h) * 100:.0f}%'
     else:
         ml_badge = '<span class="badge muted">MODEL</span>'
         ml_sub = f'{p["poss"]:.0f} poss' if p.get("poss") else "Win probability"
@@ -325,7 +327,7 @@ def period_drawer(lg_: League, g: dict, p: dict | None, ph: dict | None, pa_: di
             f'<div class="pt-note">{esc(src)}</div></details>')
 
 
-def period_card(g: dict, q: dict, code: str, label: str, kind: str, badge: str = "") -> str:
+def period_card(g: dict, q: dict, code: str, label: str, kind: str, badge: str = "", imp: dict | None = None) -> str:
     """Matchup card for one period / half: projected score, moneyline (with draw/push), spread, total."""
     h, a = g["home"], g["away"]
     goals = kind in ("hockey", "soccer")
@@ -368,10 +370,19 @@ def period_card(g: dict, q: dict, code: str, label: str, kind: str, badge: str =
               f'<span class="badge muted">Push {pd_ * 100:.1f}%</span></div>')
     margin = q["pts_home"] - q["pts_away"]
     fav_t = h if margin >= 0 else a
+    imp = imp or {}
+    root = math.sqrt(max(imp.get("share") or 0.25, 0.1))
+    mk = "Implied closing" if g["odds"].get("closing") else "Implied Mkt"
+    it, isp = imp.get("total"), imp.get("spread_home")
+    if it is not None:
+        t_sub = f"{mk} {it:.1f}"
+        t_badge = edge_badge(q["total"] - it, (0.15 if goals else 2.0) * root, (0.3 if goals else 5.0) * root,
+                             f"OVER {it:.1f}", f"UNDER {it:.1f}", neg_is_red=True, fmt="{:.1f}")
+    else:
+        t_sub, t_badge = f"{mk} —", '<span class="badge muted">NO FG LINE</span>'
     if goals:
         box2 = (f'<div class="mkt"><span class="lbl">{esc(code)} Goals</span><div class="val">{q["total"]:.2f}</div>'
-                f'<div class="sub">O0.5 {_pct(q["over"][0.5])} · O1.5 {_pct(q["over"][1.5])}</div>'
-                f'<span class="badge muted">MODEL</span></div>')
+                f'<div class="sub">{esc(t_sub)} · O0.5 {_pct(q["over"][0.5])}</div>{t_badge}</div>')
         if kind == "soccer":
             box3 = (f'<div class="mkt"><span class="lbl">{esc(code)} BTTS</span><div class="val">Yes {_pct(q["btts"])}'
                     f'</div><div class="sub">Both teams score</div><span class="badge muted">MODEL</span></div>')
@@ -381,11 +392,17 @@ def period_card(g: dict, q: dict, code: str, label: str, kind: str, badge: str =
         boxes = ml + box2 + box3
     else:
         sp = "PK" if q["spread_line"] == 0 else f'{fav_t["abbr"]} -{q["spread_line"]:g}'
+        if isp is not None:
+            s_txt = (f'{h["abbr"]} {isp:+.1f}' if isp <= 0 else f'{a["abbr"]} {-isp:+.1f}')
+            s_sub = f"{mk} {s_txt}"
+            s_badge = edge_badge(isp - q["spread_home"], 1.5 * root, 3.0 * root, f'{h["abbr"]} {isp:+.1f}',
+                                 f'{a["abbr"]} {-isp:+.1f}', fmt="{:.1f}")
+        else:
+            s_sub, s_badge = f"{mk} —", '<span class="badge muted">NO FG LINE</span>'
         box2 = (f'<div class="mkt"><span class="lbl">{esc(code)} Spread</span><div class="val">{esc(sp)}</div>'
-                f'<div class="sub">Margin {abs(margin):.1f}</div><span class="badge muted">MODEL</span></div>')
-        box3 = (f'<div class="mkt"><span class="lbl">{esc(code)} Total</span><div class="val">O/U {q["total_line"]:g}'
-                f'</div><div class="sub">Proj {q["total"]:.1f} · Over {_pct(q["p_over"])}</div>'
-                f'<span class="badge muted">MODEL</span></div>')
+                f'<div class="sub">{esc(s_sub)}</div>{s_badge}</div>')
+        box3 = (f'<div class="mkt"><span class="lbl">{esc(code)} Total</span><div class="val">{q["total"]:.1f}'
+                f'</div><div class="sub">{esc(t_sub)}</div>{t_badge}</div>')
         boxes = ml + box2 + box3
     return (f'<div class="card"><div class="ghead"><div class="gtime">{esc(tip)}</div><div class="tags">{tags}</div></div>'
             + trow(a, q["pts_away"]) + trow(h, q["pts_home"]) + bar + f'<div class="mkts">{boxes}</div></div>')
@@ -437,20 +454,27 @@ def matchups_fragment(games: list[dict], slate_for, b2b: set, kind: str, soccer:
         ph, pa_ = sl["profiles"].get(g["home"]["id"]), sl["profiles"].get(g["away"]["id"])
         badge = lg_.label if soccer else ""
         card = None
+        imp, q = None, None
         if code != "FG" and p:
             q = teams.period_projection(lg_, p, ph, pa_, idx_of[code])
             if q:
-                card = period_card(g, q, code, labels[code], kind, badge)
+                imp = decide.implied_period_lines(g["odds"], q["share"])
+                card = period_card(g, q, code, labels[code], kind, badge, imp)
         extra = ""
         if card is None:
             card = matchup_card(g, p, b2b, kind, badge=badge)
-            if p and g["state"] == "pre":
+            if p and g["state"] in ("pre", "in"):
                 gp = min((ph or {}).get("gp", 0), (pa_ or {}).get("gp", 0))
-                extra += verdict_html(decide.game_decision(lg_.key, kind, g, p, gp))
+                v = decide.game_decision(lg_.key, kind, g, p, gp)
+                if g["state"] == "in":
+                    v["reason"] = "Pregame call vs closing line · " + v["reason"]
+                extra += verdict_html(v)
                 extra += game_alt_html(g, decide.game_alt_ladders(lg_.key, kind, g, p), kind)
-        elif g["state"] == "pre":
-            extra += verdict_html(decide.verdict(False, f"No posted {labels[code]} odds — bet only if your book "
-                                                       "beats the fair price shown"))
+        elif q and imp is not None and g["state"] in ("pre", "in"):
+            v = decide.period_decision(lg_.key, kind, g, q, imp, code)
+            if g["state"] == "in":
+                v["reason"] = "Pregame call vs implied closing line · " + v["reason"]
+            extra += verdict_html(v)
         extra += period_drawer(lg_, g, p, ph, pa_)
         if extra and card.endswith("</div>"):
             card = card[:-6] + extra + "</div>"
@@ -461,6 +485,7 @@ def matchups_fragment(games: list[dict], slate_for, b2b: set, kind: str, soccer:
 def soccer_markets(g: dict, p: dict) -> str:
     """Three-way bar (away / draw / home) + Result, Total goals and Both-teams-score boxes."""
     h, a, o = g["home"], g["away"], g["odds"]
+    mkl = "Closing Mkt" if o.get("closing") else "Mkt"
     ph, pd_, pa = p["home_win_prob"], p["draw_prob"], p["away_win_prob"]
     top = max(ph, pd_, pa)
     bar = (f'<div class="winbar"><div class="a{" fav" if pa == top else ""}" style="width:{pa * 100:.0f}%"></div>'
@@ -478,7 +503,7 @@ def soccer_markets(g: dict, p: dict) -> str:
         i = max(range(3), key=lambda k: edges[k])
         lbl = "Draw" if outcomes[i][0] == "Draw" else f"{outcomes[i][0]} win"
         r_badge = edge_badge(edges[i] * 100, 3, 7, lbl, lbl, fmt="{:.0f}%")
-        r_sub = f"Mkt {pick[0]} {mkt[outcomes.index(pick)] * 100:.0f}%"
+        r_sub = f"{mkl} {pick[0]} {mkt[outcomes.index(pick)] * 100:.0f}%"
     else:
         r_badge, r_sub = '<span class="badge muted">MODEL</span>', "Home · Draw · Away"
     t_edge = (p["total"] - o["total"]) if o["total"] is not None else None
@@ -488,7 +513,7 @@ def soccer_markets(g: dict, p: dict) -> str:
             f'<div class="mkt"><span class="lbl">Result</span><div class="val">{esc(pick[0])} {pick[1] * 100:.0f}%</div>'
             f'<div class="sub">{esc(r_sub)}</div>{r_badge}</div>'
             f'<div class="mkt"><span class="lbl">Goals</span><div class="val">{p["total"]:.2f}</div>'
-            f'<div class="sub">Mkt {esc(str(o["total"]) if o["total"] is not None else "—")}</div>{t_badge}</div>'
+            f'<div class="sub">{mkl} {esc(str(o["total"]) if o["total"] is not None else "—")}</div>{t_badge}</div>'
             f'<div class="mkt"><span class="lbl">Both score</span><div class="val">Yes {p["btts_prob"] * 100:.0f}%</div>'
             f'<div class="sub">BTTS</div><span class="badge muted">MODEL</span></div></div>')
 
@@ -565,6 +590,8 @@ def render_soccer() -> None:
         page = st.selectbox("Page", list(range(1, pages + 1)), key="page_SOCCER", label_visibility="collapsed",
                             format_func=lambda i: f"Matches {(i - 1) * PAGE_SIZE + 1}–{min(i * PAGE_SIZE, n)} of {n}")
         games = games[(page - 1) * PAGE_SIZE: page * PAGE_SIZE]
+    for g in games:
+        espn.ensure_odds(LEAGUES[g["league"]], g)
     slates = {}
     for k in sorted({g["league"] for g in games}, key=order.get):
         slates[k], _ = load_team_data(k, [g for g in games if g["league"] == k])
@@ -765,6 +792,8 @@ def render_team_sport() -> None:
                             format_func=lambda i: f"Games {(i - 1) * PAGE_SIZE + 1}–{min(i * PAGE_SIZE, n)} of {n}")
         games = games[(page - 1) * PAGE_SIZE: page * PAGE_SIZE]
 
+    for g in games:  # live / final games: recover the pregame (closing) line
+        espn.ensure_odds(lg, g)
     slate, inj = load_team_data(sport, games)
     projections, b2b = slate["projections"], slate["b2b"]
 

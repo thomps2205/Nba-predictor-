@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from datetime import date, timedelta
 
-from .common import (LEAGUE_LOGOS, cache_fresh, cache_read, disk_cached, http_json, made_att, norm_name, num, to_et,
+from .common import (LEAGUE_LOGOS, cache_fresh, cache_read, cache_write, disk_cached, http_json, made_att, norm_name, num, to_et,
                      to_et_date, to_minutes)
 
 SITE = "https://site.api.espn.com/apis/site/v2/sports"
@@ -189,6 +189,89 @@ def _odds(comp: dict, home_abbr: str, away_abbr: str) -> dict:
     if ml is not None and abs(num(ml)) >= 100:
         out["ml_draw"] = num(ml)
     return out
+
+
+# --------------------------------------------------------------------------
+# Odds fallback: ESPN drops competitions[0].odds once a game goes live
+# --------------------------------------------------------------------------
+TTL_ODDS_FALLBACK = 10 * 60
+TTL_ODDS_LOCK = 14 * 24 * 3600
+
+
+def has_odds(o: dict | None) -> bool:
+    return bool(o) and any(o.get(k) is not None for k in ("spread_home", "total", "ml_home", "ml_away"))
+
+
+def _odds_lock_key(lg: League, event_id: str) -> str:
+    return f"oddslock|{lg.key}|{event_id}"
+
+
+def _fallback_fetch(lg: League, event_id: str) -> dict:
+    """Game-summary pickcenter first, then the core odds endpoint. Returns {"block": {...}, "source": ...}."""
+    try:
+        summ = http_json(f"{_base(lg)}/summary", {"event": event_id}, retries=1)
+        for pc in summ.get("pickcenter", []) or []:
+            if pc.get("details") or pc.get("overUnder") is not None or pc.get("spread") is not None:
+                return {"block": pc, "source": "pickcenter"}
+    except Exception:
+        pass
+    try:
+        core = http_json(f"https://sports.core.api.espn.com/v2/sports/{lg.sport}/leagues/{lg.league}/events/"
+                         f"{event_id}/competitions/{event_id}/odds", {"lang": "en", "region": "us"}, retries=1)
+        for it in core.get("items", []) or []:
+            if it.get("details") or it.get("overUnder") is not None or it.get("spread") is not None:
+                return {"block": it, "source": "core odds"}
+    except Exception:
+        pass
+    return {"block": {}, "source": ""}
+
+
+def _block_to_odds(block: dict, home_abbr: str, away_abbr: str) -> dict:
+    out = _odds({"odds": [block]}, home_abbr, away_abbr)
+    if out["spread_home"] is None and block.get("spread") is not None:  # pickcenter / core: home-side spread
+        sp = num(block.get("spread"), default=float("nan"))
+        if sp == sp and abs(sp) < 60:
+            fav_home = (block.get("homeTeamOdds") or {}).get("favorite")
+            fav_away = (block.get("awayTeamOdds") or {}).get("favorite")
+            if fav_away and not fav_home:
+                sp = abs(sp)
+            elif fav_home and not fav_away:
+                sp = -abs(sp)
+            out["spread_home"] = sp
+    return out
+
+
+def ensure_odds(lg: League, g: dict) -> dict:
+    """Make sure a game carries its sportsbook line. Pregame scoreboard odds are saved per event (latest wins,
+    i.e. the closing line); when the scoreboard drops them (live / final) the saved line is used, else the
+    summary pickcenter / core odds feeds are tried. Adds 'source' and 'closing' to g['odds']."""
+    key = _odds_lock_key(lg, g["id"])
+    o = g["odds"]
+    if has_odds(o):
+        o.setdefault("source", "scoreboard")
+        if g["state"] == "pre":
+            cache_write(key, {k: o.get(k) for k in ("details", "total", "spread_home", "ml_home", "ml_away",
+                                                     "ml_draw")})
+    else:
+        locked = cache_read(key)
+        if locked and has_odds(locked):
+            o.update(locked)
+            o["source"] = "saved pregame line"
+        else:
+            try:
+                fb = disk_cached(f"oddsfallback|{lg.key}|{g['id']}", TTL_ODDS_FALLBACK,
+                                 lambda: _fallback_fetch(lg, g["id"]))
+            except Exception:
+                fb = {"block": {}}
+            if fb.get("block"):
+                new = _block_to_odds(fb["block"], g["home"]["abbr"], g["away"]["abbr"])
+                if has_odds(new):
+                    o.update({k: v for k, v in new.items() if v is not None or k not in o})
+                    o["source"] = fb.get("source", "fallback")
+                    cache_write(key, {k: o.get(k) for k in ("details", "total", "spread_home", "ml_home",
+                                                             "ml_away", "ml_draw")})
+    o["closing"] = g["state"] in ("in", "post") and has_odds(o)
+    return o
 
 
 def parse_games(lg: League, raw: dict) -> list[dict]:

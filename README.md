@@ -115,6 +115,16 @@ streamlit run app.py
     (`soccer/all/teams/{id}/schedule`). It then tries the club's domestic leagues, or other international
     competitions for national teams.
   * **Parlays:** soccer legs appear in the Parlays tab and in MIX.
+* **Lines on live and finished games:** ESPN removes `competitions[0].odds` from the scoreboard once a game
+  starts.
+  * Every pregame line is saved per event, refreshed until tip-off, so it is the closing line.
+  * When the scoreboard has no odds, the app uses the saved line, else the game-summary `pickcenter`, else
+    the core `…/competitions/{id}/odds` feed.
+  * Live and final cards label it "Closing Mkt". Live games still get a BET/PASS verdict, marked "Pregame
+    call vs closing line".
+* **Implied period lines:** ESPN only posts full-game lines. 1H / 2H / 1Q–4Q / NHL period tabs scale the
+  full-game spread and total by both teams' real share of scoring in that segment (e.g. 226.5 × 0.498 = 1H
+  112.9). Those implied lines drive the edge badges and BET/PASS (priced at -110).
 * **Period markets:** a pill bar above the matchup cards switches between periods:
   * NBA & NFL: Full Game, 1st Half, 2nd Half, 1Q to 4Q.
   * NCAAB & Soccer: Full Game, 1st Half, 2nd Half.
