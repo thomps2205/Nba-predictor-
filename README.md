@@ -37,7 +37,7 @@ For the NBA only, `nba_api` (stats.nba.com advanced Pace/OffRtg/DefRtg) is an op
 inside a strict try/except with a 5-second timeout. If it fails, it is skipped for 6 hours and the
 ESPN-derived ratings are used. The app no longer calls cdn.nba.com at all.
 
-Every request sends browser-style headers and waits at least 0.6 s after the previous one. Responses are
+Every request sends browser-style headers. ESPN requests run on a pool of 8 workers spaced 0.08 s apart, so one game's ~35 player game logs load in a few seconds instead of about 35. While you look at one game, the slate's other games warm up in the background. Every other host, such as stats.nba.com and the DFS boards, still waits at least 0.6 s between requests. Responses are
 cached as JSON in `./.cache`:
 
 | Data | Cached for |

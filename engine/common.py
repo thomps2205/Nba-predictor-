@@ -21,7 +21,9 @@ ET = ZoneInfo("America/New_York")
 CACHE_DIR = Path(os.environ.get("NBA_PREDICTOR_CACHE", Path(__file__).resolve().parent.parent / ".cache"))
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-RATE_LIMIT_SECONDS = 0.6
+RATE_LIMIT_SECONDS = 0.6   # default spacing between requests to any one host (nba_api / stats.nba.com, DFS boards)
+ESPN_INTERVAL = 0.08       # ESPN's public CDN-backed APIs: requests are fanned out over a small worker pool
+FAST_HOSTS = ("espn.com",)
 HTTP_TIMEOUT = 12
 
 BROWSER_UA = (
@@ -51,15 +53,27 @@ LEAGUE_LOGOS: dict[str, str] = {
 _lock = threading.Lock()
 _last_call = [0.0]
 _session = requests.Session()
+_session.mount("https://", requests.adapters.HTTPAdapter(pool_connections=16, pool_maxsize=16))
+_session.mount("http://", requests.adapters.HTTPAdapter(pool_connections=16, pool_maxsize=16))
 
 
-def throttle() -> None:
-    """At least RATE_LIMIT_SECONDS between any two outbound requests."""
+_next_slot: dict[str, float] = {}
+
+
+def throttle(url: str = "") -> None:
+    """Per-host spacing: ESPN hosts get a short gap (safe for a few parallel workers), every other host keeps
+    RATE_LIMIT_SECONDS. Each caller reserves the next free slot under the lock and sleeps outside it."""
+    host = re.sub(r"^https?://", "", url or "").split("/")[0].lower()
+    fast = any(host.endswith(h) for h in FAST_HOSTS)
+    gap = min(ESPN_INTERVAL, RATE_LIMIT_SECONDS) if fast else RATE_LIMIT_SECONDS
+    key = host if fast else "*"
     with _lock:
-        wait = RATE_LIMIT_SECONDS - (time.monotonic() - _last_call[0])
-        if wait > 0:
-            time.sleep(wait)
-        _last_call[0] = time.monotonic()
+        now = time.monotonic()
+        slot = max(now, _next_slot.get(key, 0.0))
+        _next_slot[key] = slot + gap
+        _last_call[0] = slot
+    if slot > now:
+        time.sleep(slot - now)
 
 
 # --------------------------------------------------------------------------
@@ -87,7 +101,7 @@ def cache_read(key: str):
 
 def _cache_write(key: str, data) -> None:
     p = cache_path(key)
-    tmp = p.with_suffix(".tmp")
+    tmp = p.with_suffix(f".{threading.get_ident()}.tmp")  # unique per thread: parallel prefetch may race
     with tmp.open("w") as f:
         json.dump(data, f)
     tmp.replace(p)
@@ -136,7 +150,7 @@ def http_json(url: str, params: dict | None = None, headers: dict | None = None,
     """GET JSON with throttle + retries. Timeouts/connection drops are retried once at most."""
     last: Exception | None = None
     for attempt in range(retries):
-        throttle()
+        throttle(url)
         try:
             r = _session.get(url, params=params, headers=headers or ESPN_HEADERS, timeout=timeout)
             if r.status_code == 404:
@@ -156,7 +170,7 @@ def http_text(url: str, params: dict | None = None, headers: dict | None = None,
     """GET an HTML page with the same throttle/retry rules as http_json."""
     last: Exception | None = None
     for attempt in range(retries):
-        throttle()
+        throttle(url)
         try:
             r = _session.get(url, params=params, headers=headers or {"User-Agent": BROWSER_UA}, timeout=timeout)
             r.raise_for_status()

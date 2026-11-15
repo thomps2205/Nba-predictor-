@@ -82,23 +82,59 @@ def bucket(minutes: int = 10) -> int:
     return int(time.time() // (minutes * 60))
 
 
+PREFETCH_WORKERS = 8
+
+
 def prefetch(reqs: list[tuple], label: str) -> int:
-    """Fetch every not-yet-cached request behind one progress bar. Returns the failure count."""
+    """Fetch every not-yet-cached request in parallel behind one progress bar. Returns the failure count.
+    Requests run on a small worker pool; per-host spacing lives in engine.common.throttle."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     todo = [r for r in reqs if not cache_fresh(r[0], r[1])]
     if not todo:
         return 0
     bar = st.progress(0.0, text=f"{label} 0/{len(todo)}")
-    fails = 0
-    for i, (_, _, fetch) in enumerate(todo, 1):
-        try:
-            fetch()
-        except Exception:
-            fails += 1
-            if i >= 6 and fails == i:  # endpoint clearly down: stop instead of timing out on each
+    fails = done = 0
+    with ThreadPoolExecutor(max_workers=min(PREFETCH_WORKERS, len(todo))) as ex:
+        futs = [ex.submit(fetch) for _, _, fetch in todo]
+        for fut in as_completed(futs):
+            done += 1
+            if fut.exception() is not None:
+                fails += 1
+            if done >= 6 and fails == done:  # endpoint clearly down: drop the rest instead of timing out on each
+                for f in futs:
+                    f.cancel()
                 break
-        bar.progress(i / len(todo), text=f"{label} {i}/{len(todo)} (cached afterwards)")
+            bar.progress(done / len(todo), text=f"{label} {done}/{len(todo)} (cached afterwards)")
     bar.empty()
-    return fails
+    return fails + (len(todo) - done if fails == done and done >= 6 else 0)
+
+
+@st.cache_resource(show_spinner=False)
+def _warm_registry() -> dict:
+    return {}
+
+
+def warm_in_background(key: str, jobs: list) -> None:
+    """Fill the disk cache for jobs (callables) on a background thread, once per key per server process.
+    Used to get the slate's other games ready while the user looks at the first one."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    reg = _warm_registry()
+    if key in reg or not jobs:
+        return
+    reg[key] = time.time()
+
+    def run():
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            for f in [ex.submit(j) for j in jobs]:
+                try:
+                    f.result()
+                except Exception:
+                    pass
+
+    threading.Thread(target=run, daemon=True).start()
 
 
 # --------------------------------------------------------------------------
@@ -857,6 +893,21 @@ def load_team_data(sk: str, games: list[dict]) -> tuple[dict, list[dict]]:
     return slate, inj
 
 
+def _player_jobs(lg_: League, g: dict) -> None:
+    """Background version of prefetch_players (no Streamlit calls)."""
+    for side in ("away", "home"):
+        try:
+            espn.team_roster(lg_, g[side]["id"])
+        except Exception:
+            continue
+        for a_ in propmod.candidates(lg_, g[side]["id"]):
+            if not espn.gamelog_cached(lg_, a_["id"]):
+                try:
+                    espn.athlete_gamelog(lg_, a_["id"])
+                except Exception:
+                    pass
+
+
 def prefetch_players(lg_: League, g: dict) -> None:
     """Rosters, every prop candidate's game log, and NHL season-stat fallbacks for one game (cached)."""
     prefetch([(f"roster|{lg_.key}|{g[s]['id']}", espn.TTL_ROSTER, lambda s=s: espn.team_roster(lg_, g[s]["id"]))
@@ -935,6 +986,9 @@ def props_fragment(games: list[dict], slate: dict, inj: list[dict]) -> None:
     g = next(x for x in playable if x["id"] == gid)
 
     prefetch_players(lg, g)
+    others = [x for x in playable if x["id"] != gid and x["state"] != "post"]
+    warm_in_background(f"players|{lg.key}|{sel_date}|{bucket(30)}",
+                       [lambda x=x: _player_jobs(lg, x) for x in others])
 
     df = compute_props(lg.key, gid, float(q_sit), bucket(), g, slate["projections"][gid], slate["profiles"],
                        slate["base"], slate["b2b"], inj)
