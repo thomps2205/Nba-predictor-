@@ -96,16 +96,32 @@ border-top:1px solid var(--line);align-items:center}
 text-transform:uppercase;margin:16px 0 6px}
 .stk-h .dot{width:12px;height:12px;border-radius:50%}
 .stk-h .cnt{color:var(--muted);font-weight:700;letter-spacing:0;text-transform:none}
-.stk-row{display:flex;align-items:center;gap:10px;padding:10px 0;border-top:1px solid var(--line)}
-.stk-row:first-of-type{border-top:0}
+.stk-item{padding:10px 0 12px;border-top:1px solid var(--line)}
+.stk-item:first-of-type{border-top:0}
+.stk-row{display:flex;align-items:center;gap:10px}
+.stk-chart{margin-top:8px;background:var(--card2);border-radius:10px;padding:7px 9px 6px}
+.stk-cap{display:flex;justify-content:space-between;gap:8px;font-size:.62rem;color:var(--muted);
+text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px}
+.stk-cap b{color:var(--green)}
+.stk-bars{position:relative;display:grid;gap:4px;align-items:end;height:56px}
+.stk-bars .c{display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;min-width:0}
+.stk-bars .c .v{font-size:.6rem;font-weight:800;color:var(--text);line-height:1;margin-bottom:2px;
+font-variant-numeric:tabular-nums}
+.stk-bars .c .v.miss{color:var(--red)}
+.stk-bars .c i{display:block;width:100%;max-width:22px;border-radius:3px 3px 1px 1px;background:var(--green)}
+.stk-bars .c i.miss{background:var(--red)}
+.stk-bars .ln{position:absolute;left:0;right:0;border-top:1.5px dashed rgba(255,255,255,.55);pointer-events:none}
+.stk-opps{display:grid;gap:4px;margin-top:3px}
+.stk-opps span{font-size:.52rem;color:var(--muted);text-align:center;overflow:hidden;white-space:nowrap}
+.stk-leg{display:flex;align-items:center;gap:5px;font-size:.58rem;color:var(--muted);margin-top:5px}
+.stk-leg i{display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--green)}
+.stk-leg i.miss{background:var(--red);margin-left:6px}
+.stk-leg .dash{display:inline-block;width:14px;border-top:1.5px dashed rgba(255,255,255,.55);margin-left:6px}
 .stk-main{flex:1;min-width:0}
 .stk-pick{font-weight:800;font-size:.92rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .stk-pick .ln{color:var(--green)}
 .stk-sub{color:var(--muted);font-size:.7rem;margin-top:2px;line-height:1.35}
 .stk-sub .ok{color:var(--green);font-weight:800}.stk-sub .warn{color:var(--amber);font-weight:800}
-.stk-spark{display:flex;gap:3px;margin-top:5px;align-items:flex-end;height:18px}
-.stk-spark i{display:block;width:9px;border-radius:2px;background:var(--green)}
-.stk-spark i.miss{background:var(--red)}
 .stk-chips{display:flex;gap:3px;margin-top:5px;flex-wrap:wrap}
 .stk-chips span{font-size:.62rem;padding:1px 5px;border-radius:5px;background:var(--green-bg);color:var(--green);
 font-weight:800}
@@ -116,8 +132,10 @@ font-weight:800}
 div[class*="st-key-stkrow_"]{position:relative;gap:0;background:var(--card);border:1px solid var(--line);
 border-radius:14px;padding:0 12px;margin-bottom:6px;cursor:pointer}
 div[class*="st-key-stkrow_"]:active{border-color:var(--green)}
-div[class*="st-key-stkrow_"] .stk-row{border-top:0}
+div[class*="st-key-stkrow_"] .stk-item{border-top:0}
+div[class*="st-key-stkrow_"] [data-testid="stMarkdownContainer"]{margin-bottom:0!important}
 div[class*="st-key-stkrow_"] .stk-row:after{content:"›";color:var(--muted);font-size:1.3rem;margin-left:2px}
+div[class*="st-key-stkrow_"]{overflow:hidden}
 div[class*="st-key-stkrow_"] [data-testid="stElementContainer"]:has(.stButton){position:absolute!important;
 inset:0!important;width:100%!important;max-width:none!important;height:100%!important;z-index:3;margin:0!important}
 div[class*="st-key-stkrow_"] .stButton,div[class*="st-key-stkrow_"] .stButton button{width:100%!important;
