@@ -113,6 +113,27 @@ font-weight:800}
 .stk-k{text-align:right;min-width:58px}
 .stk-k .num{display:block;font-size:1.05rem;font-weight:900;color:var(--green);font-variant-numeric:tabular-nums}
 .stk-k .lbl{font-size:.58rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+div[class*="st-key-stkrow_"]{position:relative;gap:0;background:var(--card);border:1px solid var(--line);
+border-radius:14px;padding:0 12px;margin-bottom:6px;cursor:pointer}
+div[class*="st-key-stkrow_"]:active{border-color:var(--green)}
+div[class*="st-key-stkrow_"] .stk-row{border-top:0}
+div[class*="st-key-stkrow_"] .stk-row:after{content:"›";color:var(--muted);font-size:1.3rem;margin-left:2px}
+div[class*="st-key-stkrow_"] [data-testid="stElementContainer"]:has(.stButton){position:absolute!important;
+inset:0!important;width:100%!important;max-width:none!important;height:100%!important;z-index:3;margin:0!important}
+div[class*="st-key-stkrow_"] .stButton,div[class*="st-key-stkrow_"] .stButton button{width:100%!important;
+height:100%!important;min-height:0;opacity:0;cursor:pointer}
+.pp .pp-r{display:grid;grid-template-columns:.75fr .85fr 1fr .75fr .75fr 1.05fr 50px;gap:4px;padding:7px 8px;
+font-size:.74rem;align-items:center;border-top:1px solid var(--line);font-variant-numeric:tabular-nums}
+.pp .pp-r span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pp .pp-r .sg{font-weight:800;color:var(--green)}
+.pp .pp-r .stk{white-space:normal;line-height:1.15}.pp .pp-r .stk small{color:var(--muted)}
+.pp .pp-r .vpill{padding:2px 6px;font-size:.6rem}
+.pp .pp-r.head,.gl-r.head{border-top:0;background:var(--card2);color:var(--muted);font-size:.6rem;font-weight:800;
+text-transform:uppercase;letter-spacing:.05em}
+.gl-r{display:grid;gap:4px;padding:6px 8px;font-size:.72rem;border-top:1px solid var(--line);
+font-variant-numeric:tabular-nums;align-items:center}
+.gl-r span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gl-r .v.hit{color:var(--green);font-weight:800}.gl-r .v.miss{color:var(--red);font-weight:800}
 .verdict{display:flex;align-items:center;gap:8px;margin:10px 0 2px;padding:8px 10px;border-radius:12px;
 font-size:.8rem;line-height:1.35}
 .verdict.bet{background:rgba(34,197,94,.12);border:1px solid rgba(34,197,94,.45)}

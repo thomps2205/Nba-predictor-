@@ -182,6 +182,7 @@ streamlit run app.py
   * **Team streaks:** points or goals scored and win streaks. For soccer: scored 1+, over 1.5 and over 2.5 match goals, both teams scored, unbeaten, won, and clean sheets (4+ matches).
   * **UFC:** win streaks, wins inside the distance, KO/TKO and submission runs, and fights that went or didn't go the distance.
   * **Loading:** the tab loads only when you open it, and all the slate's game logs load in parallel.
+  * **Player profiles:** tap any player streak to open their profile. It shows tonight's projection, line, L5, season average, streak and a BET/PASS pill for every market. Below that are the full prop report for any market (form, matchup, risk, splits, alt lines, news) and the last 15 games, coloured green or red against their streak lines.
 * **UFC:**
   * **Fight Card** lists every bout from the main event down to the prelims, with records, odds, win
     probability, the pick and the predicted method (KO/TKO, Submission, Decision).

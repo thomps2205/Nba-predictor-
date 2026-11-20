@@ -17,6 +17,7 @@ import os
 import time
 from datetime import date, datetime, timedelta
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -1021,7 +1022,8 @@ def streaks_fragment(games: list[dict], slate: dict, inj: list[dict]) -> None:
          "goes (5+ games). Each line is the best round number for the run: long enough to matter, high enough to "
          "be worth playing. Proj = tonight's model projection — ⚠ means the model sees it falling short. "
          "Streaks end; this is history, not a guarantee.")
-    render_streaks(rows, {g["id"]: g for g in chosen}, proj, sport)
+    render_streaks(rows, {g["id"]: g for g in chosen}, proj, sport,
+                   ctx={"games": {g["id"]: g for g in chosen}, "slate": slate, "inj": inj, "rows": rows})
 
 
 STK_COLORS = ["#3ddc84", "#a855f7", "#f59e0b", "#3b82f6", "#f43f5e", "#14b8a6", "#eab308", "#ec4899"]
@@ -1073,7 +1075,7 @@ def streak_row(r: dict, g: dict | None, proj: dict) -> str:
             f'<div class="stk-k"><span class="num">{r["k"]}/{r["k"]}</span><span class="lbl">straight</span></div></div>')
 
 
-def render_streaks(rows: list[dict], games_by_id: dict, proj: dict, sport_key: str) -> None:
+def render_streaks(rows: list[dict], games_by_id: dict, proj: dict, sport_key: str, ctx: dict | None = None) -> None:
     if not rows:
         empty_card("No active streaks yet.", "Streaks need 5+ recent games (4 for soccer, 2 bouts for UFC).")
         return
@@ -1092,10 +1094,136 @@ def render_streaks(rows: list[dict], games_by_id: dict, proj: dict, sport_key: s
         sec = sorted((r for r in rows if r["label"] == label),
                      key=lambda r: (-r["k"], -(r["t"] or 0) / max(r.get("avg") or 1, 1e-9)))
         shown = sec if pick != "All" else sec[:STK_PER_SECTION]
-        html.append(f'<div class="stk-h"><span class="dot" style="background:{STK_COLORS[i % len(STK_COLORS)]}">'
-                    f'</span>{esc(label)}<span class="cnt">· {len(sec)}</span></div><div class="card">'
-                    + "".join(streak_row(r, games_by_id.get(r["gid"]), proj) for r in shown) + "</div>")
-    H("".join(html))
+        head = (f'<div class="stk-h"><span class="dot" style="background:{STK_COLORS[i % len(STK_COLORS)]}">'
+                f'</span>{esc(label)}<span class="cnt">· {len(sec)}</span></div>')
+        if ctx is None:  # not clickable (soccer / UFC): one static card
+            html.append(head + '<div class="card">' + "".join(
+                streak_row(r, games_by_id.get(r["gid"]), proj) for r in shown) + "</div>")
+            continue
+        H("".join(html) + head)
+        html = []
+        for r in shown:
+            key = f'stkrow_{sport_key}_{i}_{r["kind"]}_{r["id"]}_{r["m"]}'
+            with st.container(key=key):
+                H(streak_row(r, games_by_id.get(r["gid"]), proj))
+                if r["kind"] == "player" and st.button("Open player profile", key=f"btn_{key}"):
+                    player_dialog(r["id"], r["gid"], r["m"], ctx)
+    if html:
+        H("".join(html))
+
+
+GLOG_COLS = {"basketball": [("MIN", "MIN"), ("PTS", "PTS"), ("REB", "REB"), ("AST", "AST"), ("PRA", "PRA")],
+             "football": [("PASS", "Pass"), ("RUSH", "Rush"), ("REC", "RecYd"), ("RECS", "Rec")],
+             "hockey": [("G", "G"), ("A", "A"), ("PTS", "PTS"), ("SOG", "SOG")]}
+
+
+def book_for(g: dict) -> dict:
+    return {**cached_lines(lg.key, bucket(5)), **cached_odds_api(lg.key, g["home"]["name"], g["away"]["name"],
+                                                                  bucket(30)),
+            **cached_espn_props(lg.key, g["id"], bucket(5))}
+
+
+@st.dialog("Player profile", width="large")
+def player_dialog(pid: str, gid: str, m0: str, ctx: dict) -> None:
+    """Full player card: tonight's projections and lines for every market, active streaks, the prop report
+    for the chosen market, and the recent game log."""
+    kind = lg.kind
+    g, slate, inj = ctx["games"][gid], ctx["slate"], ctx["inj"]
+    markets = propmod.MARKETS[kind]
+    mlabels = dict(markets)
+    row = None
+    if gid in slate["projections"]:
+        try:
+            df = compute_props(lg.key, gid, float(q_sit), bucket(), g, slate["projections"][gid], slate["profiles"],
+                               slate["base"], slate["b2b"], inj)
+            hit = df[df["Id"] == pid] if not df.empty else df
+            row = hit.to_dict("records")[0] if len(hit) else None
+        except Exception:
+            row = None
+    logs = []
+    raw = espn.cached_gamelog(lg, pid)
+    if raw:
+        try:
+            logs = espn.parse_gamelog(raw, kind, g["date"])
+        except Exception:
+            logs = []
+    if kind == "basketball":
+        logs = [x for x in logs if x.get("MIN", 1) > 0]
+    mine = [x for x in ctx["rows"] if x["kind"] == "player" and x["id"] == pid]
+    base = mine[0] if mine else {}
+    name = row["Player"] if row else base.get("name", "Player")
+    team = row["Team"] if row else base.get("team", "")
+    opp = row["Opp"] if row else base.get("opp", "")
+    shot = (row or {}).get("Headshot") or base.get("headshot", "")
+    status = (row or {}).get("Status") or base.get("status") or "Active"
+    pos = (row or {}).get("Pos", "")
+    H(f'<div class="card"><div class="ev-head"><div style="display:flex;gap:12px;align-items:center">'
+      f'{avatar_html(shot, name, 64)}<div><div class="ev-name">{esc(name)}</div>'
+      f'<div class="psub">{esc(" · ".join(x for x in (pos, team, f"vs {opp}" if opp else "") if x))}</div>'
+      f'<div class="psub">{len(logs)} games logged · {esc(status)}</div></div></div></div></div>')
+
+    # tonight: every market at a glance
+    book = book_for(g)
+    trs = []
+    infos = {}
+    for m, label in markets:
+        vals = [propmod.stat_value(kind, m, x) for x in logs]
+        avg = float(np.mean(vals)) if vals else None
+        l5 = float(np.mean(vals[:5])) if vals else None
+        stk = next((x for x in mine if x["m"] == m), None)
+        if row is not None and row.get(f"P_{m}") == row.get(f"P_{m}"):
+            info = prop_line_info(row, m, label, kind, linesmod.lookup(book, pid, name, m), 0)
+            infos[m] = info
+            v = info["verdict"]["verdict"]
+            side = "O" if row[f"P_{m}"] > info["line"] else "U"
+            pill = (f'<span class="vpill {"bet" if v == "BET" else "pass"} sm">{v}</span>'
+                    if v in ("BET", "PASS") else "")
+            proj_txt, line_txt = f'{row[f"P_{m}"]:.1f}', f'{side} {info["line"]:g}'
+        else:
+            pill, proj_txt, line_txt = "", "—", "—"
+        trs.append(f'<div class="pp-r"><span class="sg" title="{esc(label)}">{esc(m)}</span><span>{proj_txt}</span>'
+                   f'<span>{esc(line_txt)}</span><span>{"—" if l5 is None else f"{l5:.1f}"}</span>'
+                   f'<span>{"—" if avg is None else f"{avg:.1f}"}</span>'
+                   f'<span class="stk">{(_fmt_line(stk["t"]) + "+ <small>" + str(stk["k"]) + "/" + str(stk["k"]) + "</small>") if stk else "—"}</span>'
+                   f'<span>{pill}</span></div>')
+    H('<div class="card"><div class="sub-h" style="margin-top:0">Tonight</div><div class="ptab pp">'
+      '<div class="pp-r head"><span>Mkt</span><span>Proj</span><span>Line</span><span>L5</span>'
+      '<span>Szn</span><span>Streak</span><span></span></div>' + "".join(trs) + "</div>"
+      '<div class="pt-note">Line = sportsbook / DFS line, else the implied line (L5/L10 × opponent defense). '
+      'O/U = the side the model takes.</div></div>')
+
+    if row is not None and infos:
+        opts = [m for m, _ in markets if m in infos]
+        m = st.segmented_control("Report market", opts, default=m0 if m0 in opts else opts[0],
+                                 key=f"pp_m_{pid}", format_func=lambda k: mlabels[k],
+                                 label_visibility="collapsed", width="stretch") or (m0 if m0 in opts else opts[0])
+        info = infos[m]
+        arts = cached_news(lg.key, (g["away"]["id"], g["home"]["id"]), bucket(5))
+        H(report.report(SPORT_NAME.get(sport, sport), row, m, mlabels[m], kind, info,
+                        report.confidence(row, m, info), verdict_html(info["verdict"]), alt_drawer(info, mlabels[m]),
+                        news_html(newsmod.for_player(arts, pid, name))))
+    elif not logs:
+        empty_card("No game log on ESPN for this player yet.")
+
+    if logs:
+        cols = GLOG_COLS.get(kind, [])
+        lines_ = {x["m"]: x["t"] for x in mine}
+        tmpl = f"grid-template-columns:52px 52px repeat({len(cols)},1fr)"
+        head = "".join(f"<span>{esc(c[1])}</span>" for c in cols)
+        body = []
+        for x in logs[:15]:
+            cells = []
+            for c, _ in cols:
+                v = propmod.stat_value(kind, c, x) if c != "MIN" else x.get("MIN", 0)
+                t = lines_.get(c)
+                cls = "" if t is None else (" hit" if v >= t else " miss")
+                cells.append(f'<span class="v{cls}">{v:.0f}</span>')
+            body.append(f'<div class="gl-r" style="{tmpl}"><span>{x["date"].month}/{x["date"].day}</span>'
+                        f'<span>{"@" if x.get("away") else "vs"} {esc(x.get("opp", ""))}</span>{"".join(cells)}</div>')
+        H(f'<div class="card"><div class="sub-h" style="margin-top:0">Game log (last {min(15, len(logs))})</div>'
+          f'<div class="ptab"><div class="gl-r head" style="{tmpl}"><span>Date</span><span>Opp</span>{head}</div>'
+          + "".join(body) + '</div><div class="pt-note">Green / red = cleared or missed the streak line for '
+          'that stat.</div></div>')
 
 
 @st.fragment
