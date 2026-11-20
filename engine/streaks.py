@@ -46,6 +46,14 @@ def best_streak(vals: list[float], floor: float, step: float = 1, min_k: int = M
     return best
 
 
+def _md(iso) -> str:
+    try:
+        y, m, d = str(iso)[:10].split("-")
+        return f"{int(m)}/{int(d)}"
+    except Exception:
+        return ""
+
+
 def run_length(flags: list[bool]) -> int:
     return next((i for i, f in enumerate(flags) if not f), len(flags))
 
@@ -83,7 +91,8 @@ def player_streaks(lg, game: dict, inj_all: list[dict]) -> list[dict]:
                             "team": team["abbr"], "opp": opp["abbr"], "home": side == "home", "gid": game["id"],
                             "headshot": a.get("headshot") or "", "logo": team.get("logo", ""),
                             "status": status if cls not in ("", "ACTIVE") else "", "last": vals[:10],
-                            "opps": [r.get("opp", "") for r in logs[:10]]})
+                            "opps": [r.get("opp", "") for r in logs[:10]],
+                            "dates": [f'{r["date"].month}/{r["date"].day}' for r in logs[:10]]})
     return out
 
 
@@ -116,7 +125,8 @@ def team_streaks(lg, game: dict, profiles: dict) -> list[dict]:
             s = best_streak([g["pf"] for g in log], floor, step, min_k)
             if s:
                 out.append({**s, **base, "m": "TEAM", "label": f"Team {unit}",
-                            "last": [g["pf"] for g in log[:10]], "opps": []})
+                            "last": [g["pf"] for g in log[:10]], "opps": [],
+                            "dates": [_md(g.get("date")) for g in log[:10]]})
             flags = [("Won", lambda g: g["pf"] > g["pa"])]
         else:
             flags = SOCCER_FLAGS
@@ -126,7 +136,8 @@ def team_streaks(lg, game: dict, profiles: dict) -> list[dict]:
             if k >= min_k:
                 out.append({**base, "m": "TEAMRUN", "label": label, "t": None, "k": k, "hits": sum(fl),
                             "avg": None, "score": k, "flag": label,
-                            "last": [f"{g['pf']:.0f}-{g['pa']:.0f}" for g in log[:10]], "opps": []})
+                            "last": [f"{g['pf']:.0f}-{g['pa']:.0f}" for g in log[:10]], "opps": [],
+                            "dates": [_md(g.get("date")) for g in log[:10]]})
     return out
 
 
@@ -144,7 +155,8 @@ def fighter_streaks(bouts: list[dict]) -> list[dict]:
             base = {"kind": "fighter", "name": prof["name"], "id": card_f.get("id", ""), "team": "",
                     "opp": opp["name"], "gid": b["id"], "headshot": prof.get("headshot", ""), "logo": "",
                     "status": "", "n": len(rec), "t": None, "avg": None,
-                    "last": [f'{h["result"]} {h["method"]}'.strip() for h in rec], "opps": [h["opponent"] for h in rec]}
+                    "last": [f'{h["result"]} {h["method"]}'.strip() for h in rec], "opps": [h["opponent"] for h in rec],
+                    "dates": [_md(h.get("_d")) for h in rec]}
             for label, f, min_k in (("Win streak", lambda h: h["result"] == "W", 2),
                                     ("Wins inside the distance", lambda h: h["result"] == "W" and h["code"] in ("KO", "SUB"), 2),
                                     ("Wins by KO/TKO", lambda h: h["result"] == "W" and h["code"] == "KO", 2),

@@ -1072,7 +1072,13 @@ def streak_row(r: dict, g: dict | None, proj: dict) -> str:
             f'<div class="c"><span class="v{"" if v >= r["t"] else " miss"}">{v:.{d}f}</span>'
             f'<i class="{"" if v >= r["t"] else "miss"}" style="height:{max(3, bar_h * v / top):.0f}px"></i></div>'
             for v in vals)
-        labels = "".join(f'<span>{esc(o[:4]) if o else ""}</span>' for o in opps) if any(opps) else ""
+        dates = list(reversed((r.get("dates") or [])[:len(r["last"])]))
+        if len(dates) != len(vals):
+            dates = [""] * len(vals)
+        if len(opps) != len(vals):
+            opps = [""] * len(vals)
+        labels = "".join(f'<span>{esc(o[:4])}<small>{esc(d_)}</small></span>' for o, d_ in zip(opps, dates)) \
+            if (any(opps) or any(dates)) else ""
         n = len(vals)
         hits10 = sum(v >= r["t"] for v in vals)
         chart = (f'<div class="stk-chart"><div class="stk-cap"><span>Last {n} games · oldest → newest</span>'
@@ -1086,7 +1092,8 @@ def streak_row(r: dict, g: dict | None, proj: dict) -> str:
         hit = r["k"]
         chart = ('<div class="stk-chart"><div class="stk-cap"><span>Recent results · newest first</span>'
                  f'<span><b>{hit}</b> in a row</span></div><div class="stk-chips">' + "".join(
-                     f'<span class="{"" if i < hit else "miss"}">{esc(str(v))}</span>'
+                     f'<span class="{"" if i < hit else "miss"}">{esc(str(v))}'
+                     + (f'<small>{esc((r.get("dates") or [""] * 9)[i])}</small>' if r.get("dates") else "") + '</span>'
                      for i, v in enumerate(r["last"][:8])) + "</div></div>")
     return (f'<div class="stk-item"><div class="stk-row">{vis}<div class="stk-main"><div class="stk-pick">{pick}</div>'
             f'<div class="stk-sub">{" · ".join(bits)}</div></div>'

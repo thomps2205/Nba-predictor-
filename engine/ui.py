@@ -113,6 +113,7 @@ font-variant-numeric:tabular-nums}
 .stk-bars .ln{position:absolute;left:0;right:0;border-top:1.5px dashed rgba(255,255,255,.55);pointer-events:none}
 .stk-opps{display:grid;gap:4px;margin-top:3px}
 .stk-opps span{font-size:.52rem;color:var(--muted);text-align:center;overflow:hidden;white-space:nowrap}
+.stk-opps span small{display:block;font-size:.5rem;color:var(--muted);opacity:.8;margin-top:1px}
 .stk-leg{display:flex;align-items:center;gap:5px;font-size:.58rem;color:var(--muted);margin-top:5px}
 .stk-leg i{display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--green)}
 .stk-leg i.miss{background:var(--red);margin-left:6px}
@@ -126,6 +127,7 @@ font-variant-numeric:tabular-nums}
 .stk-chips span{font-size:.62rem;padding:1px 5px;border-radius:5px;background:var(--green-bg);color:var(--green);
 font-weight:800}
 .stk-chips span.miss{background:var(--red-bg);color:var(--red)}
+.stk-chips span small{display:block;font-size:.5rem;font-weight:600;opacity:.75;text-align:center}
 .stk-k{text-align:right;min-width:58px}
 .stk-k .num{display:block;font-size:1.05rem;font-weight:900;color:var(--green);font-variant-numeric:tabular-nums}
 .stk-k .lbl{font-size:.58rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
