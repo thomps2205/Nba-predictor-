@@ -1077,7 +1077,8 @@ def render_streaks(rows: list[dict], games_by_id: dict, proj: dict, sport_key: s
     if not rows:
         empty_card("No active streaks yet.", "Streaks need 5+ recent games (4 for soccer, 2 bouts for UFC).")
         return
-    mk_rank = {lab: i for lst in propmod.MARKETS.values() for i, (_, lab) in enumerate(lst)}
+    kind_ = LEAGUES[sport_key].kind if sport_key in LEAGUES else ""
+    mk_rank = {lab: i for i, (_, lab) in enumerate(propmod.MARKETS.get(kind_, []))}
     first: dict[str, int] = {}
     for i, r in enumerate(rows):
         first.setdefault(r["label"], i)
