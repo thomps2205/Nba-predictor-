@@ -176,6 +176,12 @@ streamlit run app.py
     62–85% model probability (higher means the price is too short) and a ≥ 60% last-10 hit rate.
   * Props without a PrizePicks / Underdog line use an estimated line (last-10 average), marked "est. line".
 * **Injuries** (NBA, NFL, NHL) shows ESPN's report for every team on the slate.
+* **🔥 Streaks tab** for NBA, NCAAB, NFL, NHL, Soccer and UFC. It lists hit-rate streaks: the line each player has cleared in every one of their recent games, shown as "D. Bane · 15+ Points · 9/9".
+  * **Choosing the line:** the candidate lines are the lowest values of the last 5, 6, … games. Each is scored by streak length × (line ÷ season average)², and lines below a per-market minimum are skipped. That way a trivial 4+ points can't win just because it never missed.
+  * **Each row shows:** the season hit count at that line, the average, a bar for each of the last 10 games (red where the player missed), and tonight's model projection. ⚠ marks a projection below the line. Players ruled OUT are left out.
+  * **Team streaks:** points or goals scored and win streaks. For soccer: scored 1+, over 1.5 and over 2.5 match goals, both teams scored, unbeaten, won, and clean sheets (4+ matches).
+  * **UFC:** win streaks, wins inside the distance, KO/TKO and submission runs, and fights that went or didn't go the distance.
+  * **Loading:** the tab loads only when you open it, and all the slate's game logs load in parallel.
 * **UFC:**
   * **Fight Card** lists every bout from the main event down to the prelims, with records, odds, win
     probability, the pick and the predicted method (KO/TKO, Submission, Decision).

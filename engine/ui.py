@@ -92,6 +92,27 @@ border-top:1px solid var(--line);align-items:center}
 .form-row .res.w{color:var(--green);background:var(--green-bg)}
 .form-row .res.l{color:var(--red);background:var(--red-bg)}
 .form-row .fd{color:var(--muted);text-align:right}
+.stk-h{display:flex;align-items:center;gap:8px;font-size:.78rem;font-weight:900;letter-spacing:.06em;
+text-transform:uppercase;margin:16px 0 6px}
+.stk-h .dot{width:12px;height:12px;border-radius:50%}
+.stk-h .cnt{color:var(--muted);font-weight:700;letter-spacing:0;text-transform:none}
+.stk-row{display:flex;align-items:center;gap:10px;padding:10px 0;border-top:1px solid var(--line)}
+.stk-row:first-of-type{border-top:0}
+.stk-main{flex:1;min-width:0}
+.stk-pick{font-weight:800;font-size:.92rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.stk-pick .ln{color:var(--green)}
+.stk-sub{color:var(--muted);font-size:.7rem;margin-top:2px;line-height:1.35}
+.stk-sub .ok{color:var(--green);font-weight:800}.stk-sub .warn{color:var(--amber);font-weight:800}
+.stk-spark{display:flex;gap:3px;margin-top:5px;align-items:flex-end;height:18px}
+.stk-spark i{display:block;width:9px;border-radius:2px;background:var(--green)}
+.stk-spark i.miss{background:var(--red)}
+.stk-chips{display:flex;gap:3px;margin-top:5px;flex-wrap:wrap}
+.stk-chips span{font-size:.62rem;padding:1px 5px;border-radius:5px;background:var(--green-bg);color:var(--green);
+font-weight:800}
+.stk-chips span.miss{background:var(--red-bg);color:var(--red)}
+.stk-k{text-align:right;min-width:58px}
+.stk-k .num{display:block;font-size:1.05rem;font-weight:900;color:var(--green);font-variant-numeric:tabular-nums}
+.stk-k .lbl{font-size:.58rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
 .verdict{display:flex;align-items:center;gap:8px;margin:10px 0 2px;padding:8px 10px;border-radius:12px;
 font-size:.8rem;line-height:1.35}
 .verdict.bet{background:rgba(34,197,94,.12);border:1px solid rgba(34,197,94,.45)}

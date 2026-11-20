@@ -29,12 +29,13 @@ import engine.props
 import engine.teams
 import engine.ufc
 import engine.ufc_props
+import engine.streaks
 import engine.decide
 import engine.report
 import engine.grade
 import engine.ui
 
-_ENGINE = [engine.common, engine.decide, engine.espn, engine.teams, engine.props, engine.lines, engine.news, engine.ufc,
+_ENGINE = [engine.common, engine.decide, engine.espn, engine.teams, engine.props, engine.streaks, engine.lines, engine.news, engine.ufc,
            engine.ufc_props, engine.parlays, engine.ui, engine.report, engine.grade]  # dependency order
 
 
@@ -59,7 +60,7 @@ def _refresh_engine() -> None:
 
 _refresh_engine()
 
-from engine import decide, grade, report, espn, lines as linesmod, news as newsmod, parlays, props as propmod, teams, ufc, ufc_props  # noqa: E402
+from engine import decide, grade, report, espn, lines as linesmod, news as newsmod, parlays, props as propmod, teams, streaks as streakmod, ufc, ufc_props  # noqa: E402
 from engine.common import ET, NOTES, cache_fresh, clear_disk_cache, fmt_spread, ml_to_prob, norm_name  # noqa: E402
 from engine.espn import LEAGUES, League  # noqa: E402
 from engine.ui import (CSS, H, avatar_html, edge_badge, empty_card, esc, ladder_html,  # noqa: E402
@@ -83,6 +84,7 @@ def bucket(minutes: int = 10) -> int:
 
 
 PREFETCH_WORKERS = 8
+ALL_TABS = os.environ.get("SHARPBOARD_ALL_TABS") == "1"  # tests: render lazy tabs without clicking them
 
 
 def prefetch(reqs: list[tuple], label: str) -> int:
@@ -736,7 +738,14 @@ def render_soccer() -> None:
     for k in sorted({g["league"] for g in games}, key=order.get):
         slates[k], _ = load_team_data(k, [g for g in games if g["league"] == k])
 
-    tab_m, tab_p = st.tabs(["🎯 Matchups", "🎟 Parlays"])
+    tab_m, tab_s, tab_p = st.tabs(["🎯 Matchups", "🔥 Streaks", "🎟 Parlays"])
+    with tab_s:
+        rows = []
+        for g in games:
+            rows += streakmod.team_streaks(LEAGUES[g["league"]], g, slates[g["league"]]["profiles"])
+        note("Current runs from each team's recent results (all competitions ESPN lists): match-total overs, "
+             "both teams scoring, scoring, unbeaten, wins and clean sheets. 4+ straight matches to qualify.")
+        render_streaks(rows, {g["id"]: g for g in games}, {}, "SOCCER")
     with tab_m:
         note("Poisson goal model from each team's goals for/against (season + last 5, home edge). Cup ties and "
              "national teams with little history in that competition borrow the team's recent results from other "
@@ -957,7 +966,8 @@ def render_team_sport() -> None:
     slate, inj = load_team_data(sport, games)
     projections, b2b = slate["projections"], slate["b2b"]
 
-    tabs = st.tabs(["🎯 Matchups", "📊 Player Props", "🎟 Parlays"] + (["🩹 Injuries"] if lg.has_injuries else []))
+    tabs = st.tabs(["🎯 Matchups", "📊 Player Props", "🔥 Streaks", "🎟 Parlays"]
+                   + (["🩹 Injuries"] if lg.has_injuries else []), key=f"tabs_{sport}", on_change="rerun")
     with tabs[0]:
         note("Model line vs. market. Spread/ML badges name the side the model likes; total badges show the "
              "over/under lean. Number = edge in points (win-probability points for ML).")
@@ -965,10 +975,126 @@ def render_team_sport() -> None:
     with tabs[1]:
         props_fragment(games, slate, inj)
     with tabs[2]:
+        if tabs[2].open or ALL_TABS:  # lazy: game logs for the whole slate load only when the tab is opened
+            streaks_fragment(games, slate, inj)
+    with tabs[3]:
         parlay_fragment(games, slate, inj)
     if lg.has_injuries:
-        with tabs[3]:
+        with tabs[4]:
             render_injuries(games, inj)
+
+
+@st.cache_data(ttl=600, show_spinner=False, max_entries=96)
+def streaks_for_game(lg_key: str, gid: str, tick: int, _g: dict, _inj: list[dict], _profiles: dict) -> list[dict]:
+    lg_ = LEAGUES[lg_key]
+    return streakmod.player_streaks(lg_, _g, _inj) + streakmod.team_streaks(lg_, _g, _profiles)
+
+
+@st.fragment
+def streaks_fragment(games: list[dict], slate: dict, inj: list[dict]) -> None:
+    pool = [g for g in games if g["state"] != "post"] or games
+    labels = {"ALL": f"All games ({len(pool)})"}
+    labels.update({g["id"]: f'{g["away"]["abbr"]} @ {g["home"]["abbr"]}'
+                   + (f'  ·  {g["tip"]:%a %-I:%M %p}' if g["tip"] is not None else "") for g in pool})
+    pick = st.selectbox("Streak games", list(labels), format_func=labels.get, key=f"stk_game_{sport}",
+                        label_visibility="collapsed")
+    chosen = pool if pick == "ALL" else [g for g in pool if g["id"] == pick]
+    rost = [(f"roster|{lg.key}|{g[s]['id']}", espn.TTL_ROSTER, lambda g=g, s=s: espn.team_roster(lg, g[s]["id"]))
+            for g in chosen for s in ("away", "home")]
+    prefetch(rost, "Loading rosters")
+    cands = {a["id"]: a for g in chosen for s in ("away", "home") for a in propmod.candidates(lg, g[s]["id"])}
+    prefetch([(espn.gamelog_key(lg, aid), espn.TTL_GAMELOG, lambda aid=aid: espn.athlete_gamelog(lg, aid))
+              for aid in cands], "Loading player game logs")
+    rows, proj = [], {}
+    for g in chosen:
+        rows += streaks_for_game(lg.key, g["id"], bucket(), g, inj, slate["profiles"])
+        if g["id"] in slate["projections"]:
+            try:
+                df = compute_props(lg.key, g["id"], float(q_sit), bucket(), g, slate["projections"][g["id"]],
+                                   slate["profiles"], slate["base"], slate["b2b"], inj)
+                for r in df.to_dict("records"):
+                    for mk, _ in propmod.MARKETS[lg.kind]:
+                        proj[(r["Id"], mk)] = r.get(f"P_{mk}")
+            except Exception:
+                pass
+    note("Lines this player or team has cleared in every one of their recent games, and how far back the run "
+         "goes (5+ games). Each line is the best round number for the run: long enough to matter, high enough to "
+         "be worth playing. Proj = tonight's model projection — ⚠ means the model sees it falling short. "
+         "Streaks end; this is history, not a guarantee.")
+    render_streaks(rows, {g["id"]: g for g in chosen}, proj, sport)
+
+
+STK_COLORS = ["#3ddc84", "#a855f7", "#f59e0b", "#3b82f6", "#f43f5e", "#14b8a6", "#eab308", "#ec4899"]
+STK_PER_SECTION = 15
+
+
+def _short_name(name: str) -> str:
+    parts = name.split()
+    return f"{parts[0][0]}. {' '.join(parts[1:])}" if len(parts) > 1 else name
+
+
+def _fmt_line(t: float) -> str:
+    return f"{t:.0f}" if float(t).is_integer() else f"{t:g}"
+
+
+def streak_row(r: dict, g: dict | None, proj: dict) -> str:
+    vis = avatar_html(r["headshot"] or r["logo"], r["name"], 40)
+    if r["kind"] == "player":
+        pick = f'{esc(_short_name(r["name"]))} · <span class="ln">{_fmt_line(r["t"])}+ {esc(r["label"])}</span>'
+    elif r["m"] == "TEAM":
+        pick = f'{esc(r["name"])} · <span class="ln">{_fmt_line(r["t"])}+ {esc(r["label"])}</span>'
+    else:
+        pick = f'{esc(_short_name(r["name"]) if r["kind"] == "fighter" else r["name"])} · ' \
+               f'<span class="ln">{esc(r["label"])}</span>'
+    where = (f'{r["team"]} {"vs" if r.get("home") else "@"} {r["opp"]}' if r["kind"] != "fighter"
+             else f'vs {r["opp"]}')
+    bits = [esc(where)]
+    if r.get("avg") is not None:
+        bits.append(f'avg {r["avg"]:.1f}')
+    if r.get("hits") is not None and r.get("n"):
+        bits.append(f'{"season" if r["kind"] != "fighter" else "last"} {r["hits"]}/{r["n"]}')
+    p = proj.get((r["id"], r["m"])) if r["kind"] == "player" else None
+    if p is not None and p == p:
+        ok = p >= r["t"]
+        bits.append(f'proj {p:.1f} <span class="{"ok" if ok else "warn"}">{"✓" if ok else "⚠"}</span>')
+    if r.get("status"):
+        bits.append(f'<span class="warn">{esc(r["status"])}</span>')
+    if r.get("t") is not None:
+        top = max(max(r["last"]), r["t"]) or 1
+        spark = '<div class="stk-spark">' + "".join(
+            f'<i class="{"" if v >= r["t"] else "miss"}" style="height:{max(3, 18 * v / top):.0f}px" '
+            f'title="{v:g}"></i>' for v in reversed(r["last"])) + "</div>"
+    else:
+        hit = r["k"]
+        spark = '<div class="stk-chips">' + "".join(
+            f'<span class="{"" if i < hit else "miss"}">{esc(str(v))}</span>' for i, v in enumerate(r["last"][:8])) + "</div>"
+    return (f'<div class="stk-row">{vis}<div class="stk-main"><div class="stk-pick">{pick}</div>'
+            f'<div class="stk-sub">{" · ".join(bits)}</div>{spark}</div>'
+            f'<div class="stk-k"><span class="num">{r["k"]}/{r["k"]}</span><span class="lbl">straight</span></div></div>')
+
+
+def render_streaks(rows: list[dict], games_by_id: dict, proj: dict, sport_key: str) -> None:
+    if not rows:
+        empty_card("No active streaks yet.", "Streaks need 5+ recent games (4 for soccer, 2 bouts for UFC).")
+        return
+    mk_rank = {lab: i for lst in propmod.MARKETS.values() for i, (_, lab) in enumerate(lst)}
+    first: dict[str, int] = {}
+    for i, r in enumerate(rows):
+        first.setdefault(r["label"], i)
+    order = sorted(first, key=lambda lab: (lab not in mk_rank, mk_rank.get(lab, 0), first[lab]))
+    pick = st.pills("Streak market", ["All"] + order, default="All", key=f"stk_mkt_{sport_key}",
+                    label_visibility="collapsed") or "All"
+    html = []
+    for i, label in enumerate(order):
+        if pick != "All" and label != pick:
+            continue
+        sec = sorted((r for r in rows if r["label"] == label),
+                     key=lambda r: (-r["k"], -(r["t"] or 0) / max(r.get("avg") or 1, 1e-9)))
+        shown = sec if pick != "All" else sec[:STK_PER_SECTION]
+        html.append(f'<div class="stk-h"><span class="dot" style="background:{STK_COLORS[i % len(STK_COLORS)]}">'
+                    f'</span>{esc(label)}<span class="cnt">· {len(sec)}</span></div><div class="card">'
+                    + "".join(streak_row(r, games_by_id.get(r["gid"]), proj) for r in shown) + "</div>")
+    H("".join(html))
 
 
 @st.fragment
@@ -1336,7 +1462,11 @@ def render_card_tabs(card: dict, bouts: list[dict]) -> None:
       f'<div class="psub">{esc(start)}{" · " + esc(card["venue"]) if card["venue"] else ""}</div></div>'
       f'{status}</div></div>')
 
-    tab_card, tab_bd, tab_pl = st.tabs(["🥊 Fight Card", "🔍 Fight Breakdowns", "🎟 Parlays"])
+    tab_card, tab_bd, tab_st, tab_pl = st.tabs(["🥊 Fight Card", "🔍 Fight Breakdowns", "🔥 Streaks", "🎟 Parlays"])
+    with tab_st:
+        note("Current runs from each fighter's recent bouts on ESPN: win streaks, finishes, KOs, submissions, and "
+             "fights that went (or didn't go) the distance.")
+        render_streaks(streakmod.fighter_streaks(bouts), {}, {}, "UFC")
     with tab_card:
         note("Win % blends the model (record, experience, reach, age, striking and grappling rates) with the "
              "betting market when ESPN lists odds. Method = most likely way the pick wins.")

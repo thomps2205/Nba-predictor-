@@ -86,6 +86,8 @@ def team_profile(lg: League, team_id: str, before: date) -> dict | None:
         "last_date": games[-1]["date"], "dates": [g["date"] for g in games],
         "w": sum(g["pf"] > g["pa"] for g in games), "l": sum(g["pf"] < g["pa"] for g in games),
         "pace": None,
+        "log": [{"pf": g["pf"], "pa": g["pa"], "date": g["date"].isoformat() if hasattr(g["date"], "isoformat")
+                 else str(g["date"])} for g in reversed(games[-20:])],  # newest first, for streaks
     }
     prof.update(period_rates(lg, games))
     if lg.kind == "basketball":
