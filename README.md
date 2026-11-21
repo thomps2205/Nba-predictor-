@@ -104,13 +104,15 @@ streamlit run app.py
   * **England:** Premier League, EFL Championship, FA Cup, Carabao Cup.
   * **Europe:** LaLiga, Copa del Rey, Bundesliga, 2. Bundesliga, DFB-Pokal, Serie A, Coppa Italia, Ligue 1,
     Eredivisie, Primeira Liga, Scottish Premiership, Süper Lig.
-  * **Americas & global:** MLS, USL Championship, NWSL, Liga MX, Brasileirão, Liga Profesional, CONCACAF
-    Champions Cup, Copa Libertadores, Saudi Pro League, J1.
+  * **Americas:** MLS, USL Championship, NWSL, Liga MX, Brasileirão, Liga Profesional, CONCACAF
+    Champions Cup, Copa Libertadores.
+  * **Asia & Oceania:** Japan J1 League (also in All Featured), K League 1, Saudi Pro League, A-League Men,
+    Chinese Super League, AFC Champions League Elite.
   * **International:** World Cup, WC qualifying (UEFA / CONMEBOL / CONCACAF), UEFA Nations League,
     friendlies.
 
   How it works:
-  * **Leagues:** "All Featured" queries the 18 top active competitions at once and groups matches by
+  * **Leagues:** "All Featured" queries the 19 top active competitions (now including Japan J1) at once and groups matches by
     competition, with a badge on each card. "Choose leagues" opens the regional picker.
   * **Dates:** a Today / Next 3 Days / Weekend toggle. An empty day automatically shows the next 4 days.
   * **Model:** a Poisson goal model gives home / draw / away, projected score, total goals and

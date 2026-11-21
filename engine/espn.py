@@ -59,8 +59,12 @@ SOCCER_REGIONS = [
         ("NWSL", "usa.nwsl", "NWSL", "league"), ("LIGAMX", "mex.1", "Liga MX", "league"),
         ("BRASIL", "bra.1", "Brasileirão Série A", "league"), ("ARG", "arg.1", "Liga Profesional", "league"),
         ("CCC", "concacaf.champions", "CONCACAF Champions Cup", "cup"),
-        ("LIBERT", "conmebol.libertadores", "Copa Libertadores", "cup"),
-        ("SAUDI", "ksa.1", "Saudi Pro League", "league"), ("J1", "jpn.1", "J1 League", "league")]),
+        ("LIBERT", "conmebol.libertadores", "Copa Libertadores", "cup")]),
+    ("Asia & Oceania", [
+        ("J1", "jpn.1", "Japan J1 League", "league"), ("KLEAGUE", "kor.1", "K League 1", "league"),
+        ("SAUDI", "ksa.1", "Saudi Pro League", "league"), ("ALEAGUE", "aus.1", "A-League Men", "league"),
+        ("CSL", "chn.1", "Chinese Super League", "league"),
+        ("ACL", "afc.champions", "AFC Champions League Elite", "cup")]),
     ("International", [
         ("WC", "fifa.world", "FIFA World Cup", "intl"), ("WCQ_UEFA", "fifa.worldq.uefa", "WC Qualifying — UEFA", "intl"),
         ("WCQ_CONMEBOL", "fifa.worldq.conmebol", "WC Qualifying — CONMEBOL", "intl"),
@@ -72,7 +76,7 @@ SOCCER_LEAGUES = [(k, slug, name) for _, items in SOCCER_REGIONS for k, slug, na
 SOCCER_TYPE = {k: t for _, items in SOCCER_REGIONS for k, _, _, t in items}
 # "All Featured Leagues": the top active competitions queried together
 SOCCER_FEATURED = ["UCL", "UEL", "UECL", "EPL", "CHAMP", "FACUP", "EFLCUP", "LALIGA", "BUNDES", "SERIEA", "LIGUE1",
-                   "MLS", "LIGAMX", "WCQ_UEFA", "WCQ_CONMEBOL", "WCQ_CONCACAF", "NATIONS", "FRIENDLY"]
+                   "MLS", "LIGAMX", "J1", "WCQ_UEFA", "WCQ_CONMEBOL", "WCQ_CONCACAF", "NATIONS", "FRIENDLY"]
 SOCCER_DEFAULT = ["EPL", "LALIGA", "BUNDES", "SERIEA", "LIGUE1", "UCL", "MLS"]  # MIX uses these
 for _k, _slug, _name in SOCCER_LEAGUES:
     LEAGUES[_k] = League(_k, "soccer", _slug, "soccer", _name, False)
@@ -84,7 +88,7 @@ _INTL = ["fifa.friendly", "fifa.worldq.uefa", "fifa.worldq.conmebol", "fifa.worl
 SOCCER_FORM_FALLBACK = {
     "FACUP": ["eng.1", "eng.2"], "EFLCUP": ["eng.1", "eng.2"], "CHAMP": ["eng.1"], "COPAREY": ["esp.1"],
     "DFBPOKAL": ["ger.1", "ger.2"], "COPPAIT": ["ita.1"], "UCL": _EURO_TOP, "UEL": _EURO_TOP, "UECL": _EURO_TOP,
-    "CCC": ["usa.1", "mex.1"], "LIBERT": ["bra.1", "arg.1"],
+    "CCC": ["usa.1", "mex.1"], "LIBERT": ["bra.1", "arg.1"], "ACL": ["jpn.1", "kor.1", "ksa.1", "aus.1", "chn.1"],
     **{k: _INTL for _, items in SOCCER_REGIONS for k, _, _, t in items if t == "intl"},
 }
 TTL_SOCCER_SCOREBOARD = 10 * 60  # many competitions per view: refresh every 10 min (live scores still update)
