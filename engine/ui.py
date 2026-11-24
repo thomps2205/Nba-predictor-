@@ -156,6 +156,7 @@ font-weight:800}
 .stk-k{text-align:right;min-width:58px}
 .stk-k .num{display:block;font-size:1.05rem;font-weight:900;color:var(--green);font-variant-numeric:tabular-nums}
 .stk-k .lbl{font-size:.58rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+.stk-k.rate .num{color:var(--amber)}
 div[class*="st-key-stkrow_"]{position:relative;gap:0;background:var(--card);border:1px solid var(--line);
 border-radius:14px;padding:0 12px;margin-bottom:6px;cursor:pointer}
 div[class*="st-key-stkrow_"]:active{border-color:var(--green)}

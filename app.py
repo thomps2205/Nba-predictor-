@@ -1021,9 +1021,9 @@ def streaks_fragment(games: list[dict], slate: dict, inj: list[dict]) -> None:
                         proj[(r["Id"], mk)] = r.get(f"P_{mk}")
             except Exception:
                 pass
-    note("Lines this player or team has cleared in every one of their recent games, and how far back the run "
-         "goes (5+ games). Each line is the best round number for the run: long enough to matter, high enough to "
-         "be worth playing. Proj = tonight's model projection — ⚠ means the model sees it falling short. "
+    note("Lines this player or team has cleared in every one of their recent games (X/X straight), plus higher "
+         "lines cleared in 80%+ of recent games (e.g. 8/10) — filter with 100% / 90%+ / 80%+. Each line is the best "
+         "round number for the run: long enough to matter, high enough to be worth playing. Proj = tonight's model projection — ⚠ means the model sees it falling short. "
          "Streaks end; this is history, not a guarantee.")
     view = st.segmented_control("Streak view", ["🔥 Streaks", "🧩 Parlay builder"], default="🔥 Streaks",
                                 key=f"stk_view_{sport}", label_visibility="collapsed", width="stretch") or "🔥 Streaks"
@@ -1044,10 +1044,13 @@ def streak_parlay(rows: list[dict], proj: dict, games_by_id: dict) -> None:
     labs = dict(mk)
     pick_m = st.pills("Markets", [m for m, _ in mk], default=[m for m, _ in mk], selection_mode="multi",
                       key=f"spl_m_{sport}", format_func=labs.get, label_visibility="collapsed") or [m for m, _ in mk]
+    rsel = st.segmented_control("Leg hit rate", ["100% only", "90%+", "80%+"], default="100% only",
+                                key=f"spl_r_{sport}", label_visibility="collapsed", width="stretch") or "100% only"
     c1, c2 = st.columns(2)
-    min_k = c1.number_input("Min streak (games)", 5, 30, 5, 1, key=f"spl_k_{sport}")
+    min_k = c1.number_input("Min games in the run", 5, 30, 5, 1, key=f"spl_k_{sport}")
     skip_q = c2.toggle("Skip Questionable / DTD", True, key=f"spl_q_{sport}")
-    pool = streakmod.build_parlay(rows, proj, 10_000, set(pick_m), int(min_k), skip_q)
+    pool = streakmod.build_parlay(rows, proj, 10_000, set(pick_m), int(min_k), skip_q,
+                                  {"100% only": 0.999, "90%+": 0.9, "80%+": 0.8}[rsel])
     if len(pool) < 2:
         empty_card("Not enough streak legs with these filters.", "Lower the minimum streak or add markets.")
         return
@@ -1068,7 +1071,8 @@ def streak_parlay(rows: list[dict], proj: dict, games_by_id: dict) -> None:
           f'<div class="spl-leg">{avatar_html(x["headshot"], x["name"], 36)}<div class="spl-main">'
           f'<div class="spl-pick">{esc(_short_name(x["name"]))} · <span class="ln">{_fmt_line(x["t"])}+ {esc(x["label"])}</span></div>'
           f'<div class="spl-sub">{esc(x["team"])} {"vs" if x.get("home") else "@"} {esc(x["opp"])} · '
-          f'{x["k"]}/{x["k"]} straight · season {x["hits"]}/{x["n"]}'
+          + (f'{x["k"]}/{x["k"]} straight' if x.get("rate", 1) >= 0.999 else f'{x["wh"]}/{x["w"]} recent ({x["rate"] * 100:.0f}%)')
+          + f' · season {x["hits"]}/{x["n"]}'
           + (f' · proj {x["proj"]:.1f}' if x.get("proj") == x.get("proj") and x.get("proj") is not None else "")
           + f'</div></div><div class="spl-p"><span class="num">{x["p"] * 100:.0f}%</span>'
             f'<span class="lbl">hit</span></div></div>' for x in picks)
@@ -1139,7 +1143,7 @@ def streak_row(r: dict, g: dict | None, proj: dict) -> str:
                  f'<div class="ln" style="bottom:{line_px:.0f}px"></div></div>'
                  + (f'<div class="stk-opps" style="grid-template-columns:repeat({n},1fr)">{labels}</div>' if labels else "")
                  + '<div class="stk-leg"><i></i>cleared <i class="miss"></i>missed '
-                   f'<span class="dash"></span>{_fmt_line(r["t"])}+ streak line</div></div>')
+                   f'<span class="dash"></span>{_fmt_line(r["t"])}+ line</div></div>')
     else:
         hit = r["k"]
         chart = ('<div class="stk-chart"><div class="stk-cap"><span>Recent results · newest first</span>'
@@ -1149,7 +1153,10 @@ def streak_row(r: dict, g: dict | None, proj: dict) -> str:
                      for i, v in enumerate(r["last"][:8])) + "</div></div>")
     return (f'<div class="stk-item"><div class="stk-row">{vis}<div class="stk-main"><div class="stk-pick">{pick}</div>'
             f'<div class="stk-sub">{" · ".join(bits)}</div></div>'
-            f'<div class="stk-k"><span class="num">{r["k"]}/{r["k"]}</span><span class="lbl">straight</span></div></div>'
+            f'<div class="stk-k{"" if r.get("rate", 1) >= 0.999 else " rate"}"><span class="num">{r.get("wh", r["k"])}/'
+            f'{r.get("w", r["k"])}</span><span class="lbl">'
+            f'{"straight" if r.get("rate", 1) >= 0.999 else f"{r['rate'] * 100:.0f}% hit"}'
+            f'</span></div></div>'
             f'{chart}</div>')
 
 
@@ -1165,12 +1172,19 @@ def render_streaks(rows: list[dict], games_by_id: dict, proj: dict, sport_key: s
     order = sorted(first, key=lambda lab: (lab not in mk_rank, mk_rank.get(lab, 0), first[lab]))
     pick = st.pills("Streak market", ["All"] + order, default="All", key=f"stk_mkt_{sport_key}",
                     label_visibility="collapsed") or "All"
+    if any(r.get("rate", 1) < 0.999 for r in rows):
+        rsel = st.segmented_control("Hit rate", ["100% only", "90%+", "80%+"], default="80%+",
+                                    key=f"stk_rate_{sport_key}", label_visibility="collapsed",
+                                    width="stretch") or "80%+"
+        floor_r = {"100% only": 0.999, "90%+": 0.9, "80%+": 0.8}[rsel]
+        rows = [r for r in rows if r.get("rate", 1) >= floor_r - 1e-9]
     html = []
     for i, label in enumerate(order):
         if pick != "All" and label != pick:
             continue
         sec = sorted((r for r in rows if r["label"] == label),
-                     key=lambda r: (-r["k"], -(r["t"] or 0) / max(r.get("avg") or 1, 1e-9)))
+                     key=lambda r: (-r.get("rate", 1), -r.get("w", r["k"]),
+                                    -(r["t"] or 0) / max(r.get("avg") or 1, 1e-9)))
         shown = sec if pick != "All" else sec[:STK_PER_SECTION]
         head = (f'<div class="stk-h"><span class="dot" style="background:{STK_COLORS[i % len(STK_COLORS)]}">'
                 f'</span>{esc(label)}<span class="cnt">· {len(sec)}</span></div>')
@@ -1181,7 +1195,7 @@ def render_streaks(rows: list[dict], games_by_id: dict, proj: dict, sport_key: s
         H("".join(html) + head)
         html = []
         for r in shown:
-            key = f'stkrow_{sport_key}_{i}_{r["kind"]}_{r["id"]}_{r["m"]}'
+            key = f'stkrow_{sport_key}_{i}_{r["kind"]}_{r["id"]}_{r["m"]}_{_fmt_line(r["t"]) if r.get("t") is not None else ""}'
             with st.container(key=key):
                 H(streak_row(r, games_by_id.get(r["gid"]), proj))
                 if r["kind"] == "player" and st.button("Open player profile", key=f"btn_{key}"):
@@ -1262,7 +1276,7 @@ def player_dialog(pid: str, gid: str, m0: str, ctx: dict) -> None:
         trs.append(f'<div class="pp-r"><span class="sg" title="{esc(label)}">{esc(m)}</span><span>{proj_txt}</span>'
                    f'<span>{esc(line_txt)}</span><span>{"—" if l5 is None else f"{l5:.1f}"}</span>'
                    f'<span>{"—" if avg is None else f"{avg:.1f}"}</span>'
-                   f'<span class="stk">{(_fmt_line(stk["t"]) + "+ <small>" + str(stk["k"]) + "/" + str(stk["k"]) + "</small>") if stk else "—"}</span>'
+                   f'<span class="stk">{(_fmt_line(stk["t"]) + "+ <small>" + str(stk.get("wh", stk["k"])) + "/" + str(stk.get("w", stk["k"])) + "</small>") if stk else "—"}</span>'
                    f'<span>{pill}</span></div>')
     H('<div class="card"><div class="sub-h" style="margin-top:0">Tonight</div><div class="ptab pp">'
       '<div class="pp-r head"><span>Mkt</span><span>Proj</span><span>Line</span><span>L5</span>'
@@ -1285,7 +1299,9 @@ def player_dialog(pid: str, gid: str, m0: str, ctx: dict) -> None:
 
     if logs:
         cols = GLOG_COLS.get(kind, [])
-        lines_ = {x["m"]: x["t"] for x in mine}
+        lines_ = {}
+        for x in mine:  # perfect-streak line first
+            lines_.setdefault(x["m"], x["t"])
         tmpl = f"grid-template-columns:52px 52px repeat({len(cols)},1fr)"
         head = "".join(f"<span>{esc(c[1])}</span>" for c in cols)
         body = []

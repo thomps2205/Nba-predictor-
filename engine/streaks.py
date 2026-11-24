@@ -47,6 +47,45 @@ def best_streak(vals: list[float], floor: float, step: float = 1, min_k: int = M
     return best
 
 
+MIN_RATE = 0.8  # "hit-rate" lines: cleared in at least 80% of a recent window (not every game)
+
+
+def best_rate_line(vals: list[float], floor: float, step: float = 1, min_rate: float = MIN_RATE,
+                   min_w: int = MIN_STREAK, skip_t: float | None = None) -> dict | None:
+    """Best line cleared in >= min_rate of the last w games (w >= min_w), allowing misses. Scored by
+    window x rate^4 x (line / average)^2 so a higher line hit 8/10 can beat a trivial one hit 10/10.
+    Only lines that aren't already a perfect streak (rate < 1) and differ from skip_t are returned."""
+    n = len(vals)
+    if n < min_w:
+        return None
+    avg = float(np.mean(vals)) or 1e-9
+    best = None
+    for t in sorted({float(np.floor(v / step) * step) for v in vals}):
+        if t < floor or t <= 0 or t == skip_t:
+            continue
+        hit = [v >= t for v in vals]
+        w = next((w for w in range(n, min_w - 1, -1) if sum(hit[:w]) / w >= min_rate), None)
+        if w is None:
+            continue
+        wh = sum(hit[:w])
+        rate = wh / w
+        if rate >= 0.999:
+            continue
+        score = w * rate ** 4 * (t / avg) ** 2
+        if best is None or score > best["score"]:
+            best = {"t": t, "w": w, "wh": wh, "rate": rate, "k": run_length(hit), "n": n, "hits": sum(hit),
+                    "avg": avg, "score": score}
+    return best
+
+
+def _norm(r: dict) -> dict:
+    """Perfect streaks: window = streak length, all hits."""
+    r.setdefault("w", r["k"])
+    r.setdefault("wh", r["k"])
+    r.setdefault("rate", 1.0)
+    return r
+
+
 def _md(iso) -> str:
     try:
         y, m, d = str(iso)[:10].split("-")
@@ -85,15 +124,17 @@ def player_streaks(lg, game: dict, inj_all: list[dict]) -> list[dict]:
                 continue
             for m, label in MARKETS.get(kind, []):
                 vals = [stat_value(kind, m, r) for r in logs]
-                s = best_streak(vals, FLOOR.get(kind, {}).get(m, 1), STEP.get((kind, m), 1))
-                if not s:
-                    continue
-                out.append({**s, "kind": "player", "m": m, "label": label, "name": a["name"], "id": a["id"],
+                fl, st = FLOOR.get(kind, {}).get(m, 1), STEP.get((kind, m), 1)
+                perfect = best_streak(vals, fl, st)
+                found = [x for x in (perfect, best_rate_line(vals, fl, st, skip_t=perfect["t"] if perfect else None))
+                         if x]
+                for s in found:
+                    out.append(_norm({**s, "kind": "player", "m": m, "label": label, "name": a["name"], "id": a["id"],
                             "team": team["abbr"], "opp": opp["abbr"], "home": side == "home", "gid": game["id"],
                             "headshot": a.get("headshot") or "", "logo": team.get("logo", ""),
                             "status": status if cls not in ("", "ACTIVE") else "", "last": vals[:10],
                             "opps": [r.get("opp", "") for r in logs[:10]],
-                            "dates": [f'{r["date"].month}/{r["date"].day}' for r in logs[:10]]})
+                            "dates": [f'{r["date"].month}/{r["date"].day}' for r in logs[:10]]}))
     return out
 
 
@@ -139,7 +180,7 @@ def team_streaks(lg, game: dict, profiles: dict) -> list[dict]:
                             "avg": None, "score": k, "flag": label,
                             "last": [f"{g['pf']:.0f}-{g['pa']:.0f}" for g in log[:10]], "opps": [],
                             "dates": [_md(g.get("date")) for g in log[:10]]})
-    return out
+    return [_norm(r) for r in out]
 
 
 def fighter_streaks(bouts: list[dict]) -> list[dict]:
@@ -168,7 +209,7 @@ def fighter_streaks(bouts: list[dict]) -> list[dict]:
                 k = run_length(fl)
                 if k >= min_k:
                     out.append({**base, "m": label, "label": label, "k": k, "hits": sum(fl), "score": k})
-    return out
+    return [_norm(r) for r in out]
 
 
 # --------------------------------------------------------------------------
@@ -191,18 +232,20 @@ def leg_prob(r: dict, proj: float | None) -> float:
 
 
 def build_parlay(rows: list[dict], proj: dict, legs: int, markets: set[str] | None = None, min_k: int = 5,
-                 skip_questionable: bool = True) -> list[dict]:
-    """The `legs` most likely streak legs: one per player (his likeliest line), any game tonight."""
+                 skip_questionable: bool = True, min_rate: float = 1.0) -> list[dict]:
+    """The `legs` most likely streak legs: one per player (his likeliest line), any game tonight.
+    min_k = minimum window (games), min_rate = minimum hit rate in that window (1.0 = perfect streaks only)."""
     best: dict[str, dict] = {}
     for r in rows:
-        if r["kind"] != "player" or r["k"] < min_k or (markets and r["m"] not in markets):
+        if (r["kind"] != "player" or r.get("w", r["k"]) < min_k or r.get("rate", 1.0) < min_rate - 1e-9
+                or (markets and r["m"] not in markets)):
             continue
         if skip_questionable and r.get("status"):
             continue
         p = leg_prob(r, proj.get((r["id"], r["m"])))
         if r["id"] not in best or p > best[r["id"]]["p"]:
             best[r["id"]] = {**r, "p": p, "proj": proj.get((r["id"], r["m"]))}
-    picks = sorted(best.values(), key=lambda x: (-x["p"], -x["k"]))
+    picks = sorted(best.values(), key=lambda x: (-x["p"], -x.get("w", x["k"])))
     return picks[:legs]
 
 
