@@ -12,6 +12,7 @@ Run:  streamlit run app.py
 from __future__ import annotations
 
 import importlib
+import json
 import math
 import os
 import time
@@ -31,13 +32,14 @@ import engine.teams
 import engine.ufc
 import engine.ufc_props
 import engine.streaks
+import engine.challenge
 import engine.decide
 import engine.report
 import engine.grade
 import engine.ui
 
 _ENGINE = [engine.common, engine.decide, engine.espn, engine.teams, engine.props, engine.streaks, engine.lines, engine.news, engine.ufc,
-           engine.ufc_props, engine.parlays, engine.ui, engine.report, engine.grade]  # dependency order
+           engine.ufc_props, engine.parlays, engine.challenge, engine.ui, engine.report, engine.grade]  # dependency order
 
 
 @st.cache_resource(show_spinner=False)
@@ -61,7 +63,7 @@ def _refresh_engine() -> None:
 
 _refresh_engine()
 
-from engine import decide, grade, report, espn, lines as linesmod, news as newsmod, parlays, props as propmod, teams, streaks as streakmod, ufc, ufc_props  # noqa: E402
+from engine import decide, grade, report, espn, lines as linesmod, news as newsmod, parlays, props as propmod, teams, streaks as streakmod, challenge as chmod, ufc, ufc_props  # noqa: E402
 from engine.common import ET, NOTES, cache_fresh, clear_disk_cache, fmt_spread, ml_to_prob, norm_name  # noqa: E402
 from engine.espn import LEAGUES, League  # noqa: E402
 from engine.ui import (CSS, H, avatar_html, edge_badge, empty_card, esc, ladder_html,  # noqa: E402
@@ -74,8 +76,8 @@ H(report.REPORT_CSS)
 NOTES.clear()  # notes describe this run only (engine code adds stale-cache / endpoint warnings as it goes)
 now_et = datetime.now(ET)
 today_et = now_et.date()
-SPORTS = ["NBA", "NCAAB", "NFL", "NHL", "SOCCER", "UFC", "MIX"]
-SPORT_ICON = {"NBA": "🏀", "NCAAB": "🏀", "NFL": "🏈", "NHL": "🏒", "SOCCER": "⚽", "UFC": "🥊", "MIX": "🎟"}
+SPORTS = ["NBA", "NCAAB", "NFL", "NHL", "SOCCER", "UFC", "MIX", "CHAL"]
+SPORT_ICON = {"NBA": "🏀", "NCAAB": "🏀", "NFL": "🏈", "NHL": "🏒", "SOCCER": "⚽", "UFC": "🥊", "MIX": "🎟", "CHAL": "🎯"}
 PAGE_SIZE = 12
 
 
@@ -144,7 +146,7 @@ def warm_in_background(key: str, jobs: list) -> None:
 # Header: sport switcher + settings
 # --------------------------------------------------------------------------
 SPORT_NAME = {"NBA": "NBA", "NCAAB": "College Hoops", "NFL": "NFL", "NHL": "NHL", "SOCCER": "Soccer", "UFC": "UFC",
-              "MIX": "Mixed Parlays"}
+              "MIX": "Mixed Parlays", "CHAL": "Bankroll Challenge"}
 BRAND_MARK = ('<svg class="mark" viewBox="0 0 40 40" fill="none"><rect x="1" y="1" width="38" height="38" rx="11" '
               'fill="#0f1a12" stroke="#3ddc84" stroke-width="1.5"/><path d="M9 27l7-8 5 5 10-12" stroke="#3ddc84" '
               'stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><circle cx="31" cy="12" r="2.6" '
@@ -165,8 +167,8 @@ with st.expander("⚙️  Settings", expanded=False):
     if sport == "UFC":
         st.caption("UFC shows the current or next fight card automatically.")
         sel_date = today_et
-    elif sport == "MIX":
-        st.caption("Mixed parlays use today's NBA / NHL / Top 25 college games, top-league soccer, NFL games in "
+    elif sport in ("MIX", "CHAL"):
+        st.caption("Mixed parlays and the challenge use today's NBA / NHL / Top 25 college games, top-league soccer, NFL games in "
                    "the next 3 days, and this week's UFC card.")
         sel_date = today_et
     else:
@@ -182,8 +184,9 @@ with st.expander("⚙️  Settings", expanded=False):
 
 
 def hero(sub: str) -> None:
-    icon = SPORT_ICON[sport] if sport in ("MIX", "SOCCER") else league_logo_html(sport, 36)
-    H(f'<div class="hero"><div class="brand">{icon}{esc(sport)} <span>Picks</span></div>'
+    icon = SPORT_ICON[sport] if sport in ("MIX", "SOCCER", "CHAL") else league_logo_html(sport, 36)
+    title = {"CHAL": "Bankroll <span>Challenge</span>"}.get(sport, f"{esc(sport)} <span>Picks</span>")
+    H(f'<div class="hero"><div class="brand">{icon}{title}</div>'
       f'<div class="hero-sub">{sub}</div></div>')
 
 
@@ -1885,6 +1888,25 @@ def render_mixed() -> None:
                                    label_visibility="collapsed", width="stretch") or "Today"
     load_all = st.toggle("Scan player props in every game (default: next 2 games per sport; slower first time)",
                          key="mix_props")
+    legs, coverage = all_sports_board(mix_win, load_all)
+    board_card(coverage)
+    note("Mixed parlays combine the best value game lines and player props across sports (one leg per game, "
+         "legs from 2+ sports; props use the posted PrizePicks / Underdog line or the player's last-10 average). "
+         "Hit chances blend each sport's model (60%) with the market (40%); prices are ESPN moneylines, -110 spreads/totals and -115 "
+         "pick'em props. Not betting advice.")
+    render_parlays(legs, mixed=True)
+
+
+def board_card(coverage: list[str]) -> None:
+    H('<div class="card"><div class="sub-h" style="margin-top:0">Today\'s board</div>'
+      + "".join(f'<div class="factor" style="align-items:center"><span style="display:flex;align-items:center;'
+                f'gap:10px">{league_logo_html(c.split(":")[0], 28)}<b>{esc(c.split(":")[0])}</b></span>'
+                f'<span class="v">{esc(c.split(":", 1)[1].strip())}</span></div>' for c in coverage) + "</div>")
+
+
+def all_sports_board(mix_win: str, load_all: bool) -> tuple[list, list[str]]:
+    """Every not-started game line, top player prop and UFC fight leg across sports (shared by Mixed Parlays
+    and the Bankroll Challenge)."""
     legs, coverage = [], []
     for sk in ("NBA", "NCAAB", "NFL", "NHL"):
         try:
@@ -1940,15 +1962,196 @@ def render_mixed() -> None:
             coverage.append("UFC: no card this week")
     except Exception as e:
         coverage.append(f"UFC: unavailable ({type(e).__name__})")
-    H('<div class="card"><div class="sub-h" style="margin-top:0">Today\'s board</div>'
-      + "".join(f'<div class="factor" style="align-items:center"><span style="display:flex;align-items:center;'
-                f'gap:10px">{league_logo_html(c.split(":")[0], 28)}<b>{esc(c.split(":")[0])}</b></span>'
-                f'<span class="v">{esc(c.split(":", 1)[1].strip())}</span></div>' for c in coverage) + "</div>")
-    note("Mixed parlays combine the best value game lines and player props across sports (one leg per game, "
-         "legs from 2+ sports; props use the posted PrizePicks / Underdog line or the player's last-10 average). "
-         "Hit chances blend each sport's model (60%) with the market (40%); prices are ESPN moneylines, -110 spreads/totals and -115 "
-         "pick'em props. Not betting advice.")
-    render_parlays(legs, mixed=True)
+    return legs, coverage
+
+
+def _money(x: float) -> str:
+    return f"${x:,.2f}" if x < 1000 else f"${x:,.0f}"
+
+
+def render_challenge() -> None:
+    hero(f"{today_et:%a, %b %d}<br>Bankroll challenge")
+    note("Roll a small bankroll into a target, one bet a day — like the \"$50 to $10k\" challenges. Every bet "
+         "rides the bankroll, so one loss ends it: the app shows the real odds of finishing at every step.")
+    name = st.text_input("Challenge name", key="ch_name", placeholder="Name your challenge (e.g. xmas-25k)",
+                         label_visibility="collapsed").strip()
+    ch = chmod.load(name) if name else None
+
+    if ch is None:
+        H('<div class="sub-h">Set up a challenge</div>')
+        c1, c2 = st.columns(2)
+        start = c1.number_input("Starting bankroll ($)", 1.0, 1e6, 50.0, 5.0, key="ch_start")
+        target = c2.number_input("Target ($)", 2.0, 1e7, 10000.0, 500.0, key="ch_target")
+        c3, c4 = st.columns(2)
+        days = c3.number_input("Bets / days", 1, 100, 32, 1, key="ch_days")
+        roll = c4.slider("Rollover (% of bankroll per bet)", 25, 100, 100, 5, key="ch_roll") / 100
+        challenge_math(start, target, int(days), roll)
+        up = st.file_uploader("Restore a saved challenge (.json backup)", type=["json"], key="ch_up")
+        if up is not None:
+            try:
+                data = json.loads(up.getvalue())
+                chmod.save(data)
+                st.session_state["ch_name"] = data["name"]
+                st.rerun()
+            except Exception as e:
+                st.error(f"That file isn't a challenge backup ({e}).")
+        if st.button("Start challenge", type="primary", disabled=not name or target <= start, key="ch_create",
+                     width="stretch"):
+            chmod.save(chmod.new(name, start, target, int(days), roll))
+            st.rerun()
+        if not name:
+            st.caption("Give the challenge a name first — it's how you reopen it later.")
+        return
+
+    bank, stat = chmod.bankroll(ch), chmod.status(ch)
+    progress_card(ch, bank, stat)
+    pend = chmod.pending(ch)
+    if stat == "busted":
+        empty_card("Challenge over — a loss took the bankroll.", "Start a new one under a different name.")
+    elif stat == "complete":
+        H('<div class="card"><div class="verdict bet"><span class="vpill bet">🏆 DONE</span><span class="vtxt">'
+          f'<b>Target hit: {_money(bank)}</b> in {sum(b["result"] == "won" for b in ch["bets"])} wins.</span></div></div>')
+    elif pend:
+        H(f'<div class="sub-h">Bet {pend["n"]} — waiting on the result</div>' + bet_card(pend))
+        c1, c2, c3 = st.columns(3)
+        if c1.button("✅ Won", key="ch_won", width="stretch"):
+            chmod.settle(ch, "won"); chmod.save(ch); st.rerun()
+        if c2.button("❌ Lost", key="ch_lost", width="stretch"):
+            chmod.settle(ch, "lost"); chmod.save(ch); st.rerun()
+        if c3.button("↩ Push", key="ch_push", width="stretch"):
+            chmod.settle(ch, "push"); chmod.save(ch); st.rerun()
+    else:
+        todays_bet(ch, bank)
+    history_card(ch)
+    c1, c2 = st.columns(2)
+    c1.download_button("⬇ Backup (.json)", json.dumps(ch, indent=1), file_name=f"{chmod.slug(ch['name'])}.json",
+                       mime="application/json", key="ch_dl", width="stretch")
+    if c2.button("🗑 Delete challenge", key="ch_del", width="stretch"):
+        st.session_state["ch_del_confirm"] = True
+    if st.session_state.get("ch_del_confirm"):
+        st.warning(f"Delete \"{ch['name']}\" and its history?")
+        d1, d2 = st.columns(2)
+        if d1.button("Yes, delete", key="ch_del_yes", width="stretch"):
+            chmod.path(ch["name"]).unlink(missing_ok=True)
+            st.session_state["ch_del_confirm"] = False
+            st.rerun()
+        if d2.button("Keep it", key="ch_del_no", width="stretch"):
+            st.session_state["ch_del_confirm"] = False
+            st.rerun()
+    note("Challenges are saved on the app server under their name. Streamlit Cloud can wipe that storage when the "
+         "app restarts or redeploys — tap Backup after each bet and restore it from the setup screen if needed. "
+         "Gamble responsibly: only stake what you can afford to lose (1-800-GAMBLER).")
+
+
+def challenge_math(start: float, target: float, days: int, roll: float) -> None:
+    need = chmod.per_bet_multiplier(start, target, days, roll)
+    fair_p = 1 / need
+    allwin = fair_p ** days
+    edge_p = min(0.97, fair_p * 1.08) ** days  # every bet beating its price by 8%
+    vig_p = (fair_p * 0.955) ** days            # ~4.5% hold per bet (-110 both ways)
+    rows = chmod.ladder(start, target, need, roll, max_rows=days)
+    lad = "".join(f'<div class="ch-l"><span>#{r["n"]}</span><span>{_money(r["bank"])}</span>'
+                  f'<span>{_money(r["stake"])}</span><span class="g">{_money(r["after"])}</span></div>'
+                  for r in rows[:6])
+    more = f'<div class="pt-note">… {len(rows) - 6} more bets to {_money(target)}</div>' if len(rows) > 6 else ""
+    H(f'<div class="card"><div class="sub-h" style="margin-top:0">The math</div>'
+      f'<div class="ch-stats"><div><span class="num">{target / start:,.0f}×</span><span class="lbl">growth needed</span></div>'
+      f'<div><span class="num">{chmod.american(need)}</span><span class="lbl">odds every bet</span></div>'
+      f'<div><span class="num">{fair_p * 100:.0f}%</span><span class="lbl">hit rate those odds imply</span></div></div>'
+      f'<div class="verdict pass" style="margin-top:10px"><span class="vpill pass">⚠ ODDS</span><span class="vtxt">'
+      f'Chance to win all {days}: <b>{_pct_small(vig_p)}</b> with a normal sportsbook margin · '
+      f'<b>{_pct_small(allwin)}</b> at fair odds (always ≈ start ÷ target) · <b>{_pct_small(edge_p)}</b> if every '
+      f'pick beats its price by 8%.</span></div>'
+      f'<div class="ptab" style="margin-top:10px"><div class="ch-l head"><span>Bet</span><span>Bankroll</span>'
+      f'<span>Stake</span><span>If it wins</span></div>{lad}</div>{more}'
+      f'<div class="pt-note">Fewer, bigger-priced bets or more, safer ones — the finish chance barely moves, '
+      f'because the sportsbook margin compounds on every bet.</div></div>')
+
+
+def _pct_small(p: float) -> str:
+    if p >= 0.01:
+        return f"{p * 100:.1f}%"
+    return f"{p * 100:.2f}% (1 in {1 / p:,.0f})" if p > 0 else "0%"
+
+
+def progress_card(ch: dict, bank: float, stat: str) -> None:
+    start, target = ch["start"], ch["target"]
+    frac = 0.0 if bank <= start else min(1.0, math.log(bank / start) / math.log(target / start))
+    wins = sum(b["result"] == "won" for b in ch["bets"])
+    left = chmod.bets_left(ch)
+    need = chmod.need_dec_now(ch)
+    probs = [b["prob"] for b in ch["bets"] if b["result"] == "won" and b.get("prob")]
+    H(f'<div class="card"><div class="ev-head"><div><div class="ev-name">{esc(ch["name"])}</div>'
+      f'<div class="psub">{_money(start)} → {_money(target)} · started {esc(ch["created"])}</div></div>'
+      f'<span class="pill {"ok" if stat == "complete" else "out" if stat == "busted" else "info"}">{stat}</span></div>'
+      f'<div class="ch-stats"><div><span class="num">{_money(bank)}</span><span class="lbl">bankroll</span></div>'
+      f'<div><span class="num">{wins}</span><span class="lbl">wins in a row</span></div>'
+      f'<div><span class="num">{left if stat == "active" else "—"}</span><span class="lbl">bets left</span></div></div>'
+      f'<div class="ch-bar"><i style="width:{frac * 100:.0f}%"></i></div>'
+      f'<div class="pt-note">{frac * 100:.0f}% of the way (log scale)'
+      + (f' · next bet needs {chmod.american(need)} or longer to stay on pace' if stat == "active" else "")
+      + (f' · the wins so far had a {_pct_small(chmod.survival(probs))} chance together' if probs else "")
+      + '</div></div>')
+
+
+def bet_card(b: dict) -> str:
+    legs = "".join(f'<div class="ch-leg">• {esc(x)}</div>' for x in b.get("legs") or [])
+    hp = f' · {b["prob"] * 100:.0f}% to hit' if b.get("prob") else ""
+    return (f'<div class="card"><div class="ghead"><div class="pl-title">{esc(b["desc"])}'
+            f'<div class="psub">{chmod.american(b["dec"])}{hp} · {esc(b["date"])}</div></div>'
+            f'<span class="badge {"strong" if b["result"] == "won" else "muted" if b["result"] != "lost" else "lean"}">'
+            f'{esc(b["result"].upper())}</span></div>{legs}'
+            f'<div class="factor"><span>Stake</span><span class="v">{_money(b["stake"])}</span></div>'
+            f'<div class="factor"><span>Pays (if it wins)</span><span class="v">{_money(b["stake"] * b["dec"])}</span></div></div>')
+
+
+def todays_bet(ch: dict, bank: float) -> None:
+    need = chmod.need_dec_now(ch)
+    stake = bank * ch["rollover"]
+    H(f'<div class="sub-h">Today\'s challenge bet · {_money(stake)} stake · needs {chmod.american(need)} or longer</div>')
+    if not st.toggle("Scan today's board for the challenge bet", key="ch_scan",
+                     help="Loads every sport's games, props and fights (a few seconds the first time)."):
+        note("Turn on the scan to see today's best single or 2-leg parlay at the price this step needs.")
+    else:
+        legs, coverage = all_sports_board("Today", False)
+        opts = chmod.candidates(legs, need)
+        if not opts:
+            empty_card("Nothing on today's board pays enough at a decent hit chance.",
+                       "Skip a day (the target odds adjust), or log your own bet below.")
+        for i, o in enumerate(opts):
+            title = ["Best pick", "Alternative", "Alternative"][i]
+            H(f'<div class="card"><div class="ghead"><div class="pl-title">{title} · {chmod.american(o["dec"])}'
+              f'<div class="psub">{len(o["legs"])} leg{"s" if len(o["legs"]) > 1 else ""} · {o["prob"] * 100:.0f}% to hit '
+              f'(price implies {o["implied"] * 100:.0f}%) · pays {_money(stake * o["dec"])}</div></div>'
+              f'<span class="badge {"strong" if o["ev"] >= 0 else "muted"}">{"+EV" if o["ev"] >= 0 else "−EV"}</span></div>'
+              + "".join(leg_html(l) for l in o["legs"]) + "</div>")
+            if st.button(f"Lock in: {title.lower()} ({chmod.american(o['dec'])})", key=f"ch_lock_{i}", width="stretch"):
+                desc = " + ".join(l.pick for l in o["legs"])
+                chmod.record(ch, desc, o["dec"], o["prob"], [chmod.leg_text(l) for l in o["legs"]])
+                chmod.save(ch)
+                st.rerun()
+        with st.expander("Today's board"):
+            board_card(coverage)
+    with st.expander("✍️ Log a bet you placed yourself"):
+        desc = st.text_input("Bet", key="ch_own_desc", placeholder="e.g. Odunze 60+ rec yds + Chiefs ML")
+        odds = st.number_input("American odds", -2000, 2000, -127, 1, key="ch_own_odds")
+        dec = (1 + odds / 100) if odds > 0 else (1 + 100 / abs(odds)) if odds != 0 else 0
+        if st.button("Add bet", key="ch_own_add", disabled=not desc or abs(odds) < 100, width="stretch"):
+            chmod.record(ch, desc, dec, None, [])
+            chmod.save(ch)
+            st.rerun()
+
+
+def history_card(ch: dict) -> None:
+    done = [b for b in ch["bets"] if b["result"] != "pending"]
+    if not done:
+        return
+    rows = "".join(
+        f'<div class="ch-h"><span class="res {"w" if b["result"] == "won" else "l" if b["result"] == "lost" else ""}">'
+        f'{b["result"][0].upper()}</span><span class="d">{esc(b["desc"])}<small>{esc(b["date"])} · '
+        f'{chmod.american(b["dec"])}</small></span><span class="m">{_money(b["stake"])}</span></div>'
+        for b in reversed(done))
+    H(f'<div class="card"><div class="sub-h" style="margin-top:0">History</div>{rows}</div>')
 
 
 # --------------------------------------------------------------------------
@@ -1959,6 +2162,8 @@ try:
         render_ufc()
     elif sport == "MIX":
         render_mixed()
+    elif sport == "CHAL":
+        render_challenge()
     elif sport == "SOCCER":
         render_soccer()
     else:

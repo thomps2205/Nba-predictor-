@@ -178,6 +178,11 @@ streamlit run app.py
     62–85% model probability (higher means the price is too short) and a ≥ 60% last-10 hit rate.
   * Props without a PrizePicks / Underdog line use an estimated line (last-10 average), marked "est. line".
 * **Injuries** (NBA, NFL, NHL) shows ESPN's report for every team on the slate.
+* **🎯 Bankroll Challenge** (in the sport menu): a "$50 to $10k in N bets" rollover challenge, tracked honestly.
+  * **Setup:** a name, a starting bankroll, a target, the number of bets/days and a rollover %. The math card shows the growth needed, the odds every bet needs, a bet-by-bet ladder, and the real chance of winning them all. At fair odds that chance is always about start ÷ target, and it is lower once the sportsbook's margin is included.
+  * **Each day:** turn on the scan. It searches today's whole board (game lines, player props and UFC fights across every sport) for the most likely single or 2-leg parlay that pays at least the odds this step needs. It shows a best pick and two alternatives, each with its hit %, the hit % the price implies, the payout and a +EV/−EV tag.
+  * **Tracking:** lock a pick in (or log your own bet), then mark it Won, Lost or Push. You see the bankroll, the win streak, the bets left, a progress bar to the target, the odds needed to stay on pace, and the history.
+  * **Saving:** challenges are saved on the server by name. You can also download a .json backup and restore it, because Streamlit Cloud can wipe storage on redeploy.
 * **🔥 Streaks tab** for NBA, NCAAB, NFL, NHL, Soccer and UFC. It lists hit-rate streaks: the line each player has cleared in every one of their recent games, shown as "D. Bane · 15+ Points · 9/9".
   * **Choosing the line:** the candidate lines are the lowest values of the last 5, 6, … games. Each is scored by streak length × (line ÷ season average)², and lines below a per-market minimum are skipped. That way a trivial 4+ points can't win just because it never missed.
   * **Each row shows:** the season hit count at that line, the average, a bar for each of the last 10 games (red where the player missed), and tonight's model projection. ⚠ marks a projection below the line. Players ruled OUT are left out.
