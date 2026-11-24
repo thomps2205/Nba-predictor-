@@ -2013,6 +2013,16 @@ def render_challenge() -> None:
           f'<b>Target hit: {_money(bank)}</b> in {sum(b["result"] == "won" for b in ch["bets"])} wins.</span></div></div>')
     elif pend:
         H(f'<div class="sub-h">Bet {pend["n"]} — waiting on the result</div>' + bet_card(pend))
+        with st.expander(f"✏️ Change stake (now {_money(pend['stake'])} of {_money(bank)})",
+                         expanded=pend["stake"] < bank - 0.005):
+            new_stake = st.number_input("Stake ($)", 0.01, float(max(bank, 0.01)), float(pend["stake"]), 0.25,
+                                        key=f"ch_stake_{pend['n']}", format="%.2f")
+            s1, s2 = st.columns(2)
+            if s1.button(f"💰 Full bankroll ({_money(bank)})", key="ch_full", width="stretch"):
+                chmod.set_stake(ch, bank); chmod.save(ch); st.rerun()
+            if s2.button("Save stake", key="ch_stake_save", width="stretch",
+                         disabled=abs(new_stake - pend["stake"]) < 0.005):
+                chmod.set_stake(ch, new_stake); chmod.save(ch); st.rerun()
         c1, c2, c3 = st.columns(3)
         if c1.button("✅ Won", key="ch_won", width="stretch"):
             chmod.settle(ch, "won"); chmod.save(ch); st.rerun()
@@ -2023,6 +2033,15 @@ def render_challenge() -> None:
     else:
         todays_bet(ch, bank)
     history_card(ch)
+    with st.expander("⚙️ Challenge settings"):
+        r_new = st.slider("Rollover (% of bankroll per bet)", 25, 100, int(round(ch["rollover"] * 100)), 5,
+                          key="ch_roll_edit") / 100
+        t_new = st.number_input("Target ($)", float(ch["start"]) + 1, 1e7, float(ch["target"]), 500.0, key="ch_t_edit")
+        d_new = st.number_input("Bets / days", 1, 100, int(ch["days"]), 1, key="ch_d_edit")
+        if st.button("Save settings", key="ch_set_save", width="stretch"):
+            ch["rollover"], ch["target"], ch["days"] = r_new, float(t_new), int(d_new)
+            chmod.save(ch)
+            st.rerun()
     c1, c2 = st.columns(2)
     c1.download_button("⬇ Backup (.json)", json.dumps(ch, indent=1), file_name=f"{chmod.slug(ch['name'])}.json",
                        mime="application/json", key="ch_dl", width="stretch")
@@ -2107,7 +2126,11 @@ def bet_card(b: dict) -> str:
 
 def todays_bet(ch: dict, bank: float) -> None:
     need = chmod.need_dec_now(ch)
-    stake = bank * ch["rollover"]
+    full = st.toggle(f"Stake the full bankroll ({_money(bank)})", value=ch["rollover"] >= 0.999,
+                     key=f"ch_fullnext_{int(round(ch['rollover'] * 100))}")
+    stake = bank if full else st.number_input(
+        "Stake for this bet ($)", 0.01, float(max(bank, 0.01)), float(round(bank * ch["rollover"], 2)), 0.25,
+        key="ch_next_stake", format="%.2f")
     H(f'<div class="sub-h">Today\'s challenge bet · {_money(stake)} stake · needs {chmod.american(need)} or longer</div>')
     if not st.toggle("Scan today's board for the challenge bet", key="ch_scan",
                      help="Loads every sport's games, props and fights (a few seconds the first time)."):
@@ -2127,7 +2150,7 @@ def todays_bet(ch: dict, bank: float) -> None:
               + "".join(leg_html(l) for l in o["legs"]) + "</div>")
             if st.button(f"Lock in: {title.lower()} ({chmod.american(o['dec'])})", key=f"ch_lock_{i}", width="stretch"):
                 desc = " + ".join(l.pick for l in o["legs"])
-                chmod.record(ch, desc, o["dec"], o["prob"], [chmod.leg_text(l) for l in o["legs"]])
+                chmod.record(ch, desc, o["dec"], o["prob"], [chmod.leg_text(l) for l in o["legs"]], stake)
                 chmod.save(ch)
                 st.rerun()
         with st.expander("Today's board"):
@@ -2137,7 +2160,7 @@ def todays_bet(ch: dict, bank: float) -> None:
         odds = st.number_input("American odds", -2000, 2000, -127, 1, key="ch_own_odds")
         dec = (1 + odds / 100) if odds > 0 else (1 + 100 / abs(odds)) if odds != 0 else 0
         if st.button("Add bet", key="ch_own_add", disabled=not desc or abs(odds) < 100, width="stretch"):
-            chmod.record(ch, desc, dec, None, [])
+            chmod.record(ch, desc, dec, None, [], stake)
             chmod.save(ch)
             st.rerun()
 

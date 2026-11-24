@@ -154,12 +154,21 @@ def status(ch: dict) -> str:
     return "active"
 
 
-def record(ch: dict, desc: str, dec: float, prob: float | None, legs: list[str]) -> dict:
-    stake = round(bankroll(ch) * ch["rollover"], 2)
+def record(ch: dict, desc: str, dec: float, prob: float | None, legs: list[str],
+           stake: float | None = None) -> dict:
+    bank = bankroll(ch)
+    stake = round(min(bank, stake if stake is not None else bank * ch["rollover"]), 2)
     bet = {"n": len(ch["bets"]) + 1, "date": date.today().isoformat(), "desc": desc, "legs": legs,
            "dec": float(dec), "prob": prob, "stake": stake, "result": "pending", "ts": time.time()}
     ch["bets"].append(bet)
     return bet
+
+
+def set_stake(ch: dict, stake: float) -> None:
+    """Change the pending bet's stake (capped at the bankroll)."""
+    b = pending(ch)
+    if b:
+        b["stake"] = round(max(0.01, min(stake, bankroll(ch))), 2)
 
 
 def settle(ch: dict, result: str) -> None:
