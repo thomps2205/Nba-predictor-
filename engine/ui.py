@@ -92,6 +92,14 @@ border-top:1px solid var(--line);align-items:center}
 .form-row .res.w{color:var(--green);background:var(--green-bg)}
 .form-row .res.l{color:var(--red);background:var(--red-bg)}
 .form-row .fd{color:var(--muted);text-align:right}
+.spl-leg{display:flex;align-items:center;gap:10px;padding:9px 0;border-top:1px solid var(--line)}
+.spl-main{flex:1;min-width:0}
+.spl-pick{font-weight:800;font-size:.86rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.spl-pick .ln{color:var(--green)}
+.spl-sub{color:var(--muted);font-size:.68rem;margin-top:1px}
+.spl-p{text-align:right;min-width:44px}
+.spl-p .num{display:block;font-weight:900;color:var(--green);font-variant-numeric:tabular-nums}
+.spl-p .lbl{font-size:.56rem;color:var(--muted);text-transform:uppercase}
 .ch-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px;text-align:center}
 .ch-stats .num{display:block;font-size:1.15rem;font-weight:900;color:var(--green);font-variant-numeric:tabular-nums}
 .ch-stats .lbl{font-size:.6rem;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}

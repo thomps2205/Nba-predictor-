@@ -8,6 +8,7 @@ scorer) doesn't beat a solid line cleared in 8 straight. Only lines at or above 
 
 from __future__ import annotations
 
+import math
 from datetime import date, timedelta
 
 import numpy as np
@@ -167,4 +168,46 @@ def fighter_streaks(bouts: list[dict]) -> list[dict]:
                 k = run_length(fl)
                 if k >= min_k:
                     out.append({**base, "m": label, "label": label, "k": k, "hits": sum(fl), "score": k})
+    return out
+
+
+# --------------------------------------------------------------------------
+# Streak parlays
+# --------------------------------------------------------------------------
+def leg_prob(r: dict, proj: float | None) -> float:
+    """Chance the player clears his streak line tonight: smoothed season hit rate at that line, averaged with the
+    model projection's normal tail (sd from his last 10 games) when a projection exists. Capped at 97%."""
+    hits, n, t = r["hits"], r["n"], r["t"]
+    p_hist = (hits + 1) / (n + 2)
+    if proj is None or proj != proj:
+        return min(0.97, p_hist)
+    vals = r.get("last") or []
+    mean = sum(vals) / len(vals) if vals else proj
+    sd = math.sqrt(sum((v - mean) ** 2 for v in vals) / max(len(vals) - 1, 1)) if len(vals) > 1 else 0.0
+    sd = max(sd, 0.15 * max(proj, 1e-9), 0.8)
+    z = (t - 0.5 - proj) / sd  # integer stats: clearing t means beating t - 0.5
+    p_model = 1 - 0.5 * (1 + math.erf(z / math.sqrt(2)))
+    return min(0.97, 0.5 * p_hist + 0.5 * p_model)
+
+
+def build_parlay(rows: list[dict], proj: dict, legs: int, markets: set[str] | None = None, min_k: int = 5,
+                 skip_questionable: bool = True) -> list[dict]:
+    """The `legs` most likely streak legs: one per player (his likeliest line), any game tonight."""
+    best: dict[str, dict] = {}
+    for r in rows:
+        if r["kind"] != "player" or r["k"] < min_k or (markets and r["m"] not in markets):
+            continue
+        if skip_questionable and r.get("status"):
+            continue
+        p = leg_prob(r, proj.get((r["id"], r["m"])))
+        if r["id"] not in best or p > best[r["id"]]["p"]:
+            best[r["id"]] = {**r, "p": p, "proj": proj.get((r["id"], r["m"]))}
+    picks = sorted(best.values(), key=lambda x: (-x["p"], -x["k"]))
+    return picks[:legs]
+
+
+def parlay_prob(picks: list[dict]) -> float:
+    out = 1.0
+    for x in picks:
+        out *= x["p"]
     return out

@@ -189,6 +189,7 @@ streamlit run app.py
   * **Each row shows:** the season hit count at that line, the average, a bar for each of the last 10 games (red where the player missed), and tonight's model projection. ⚠ marks a projection below the line. Players ruled OUT are left out.
   * **Team streaks:** points or goals scored and win streaks. For soccer: scored 1+, over 1.5 and over 2.5 match goals, both teams scored, unbeaten, won, and clean sheets (4+ matches).
   * **UFC:** win streaks, wins inside the distance, KO/TKO and submission runs, and fights that went or didn't go the distance.
+  * **🧩 Parlay builder** (switch at the top of the tab): builds a parlay from players on streaks in tonight's games. Choose the legs with a slider, from 2 up to every eligible player, plus the markets, a minimum streak length, and whether to skip Questionable players. It uses one leg per player at their likeliest streak line, ranked safest first. Each leg's hit chance blends the season hit rate at that line with tonight's projection, capped at 97%. The card shows the parlay's combined hit chance, its fair odds, and the weakest leg.
   * **Loading:** the tab loads only when you open it, and all the slate's game logs load in parallel.
   * **Player profiles:** tap any player streak to open their profile. It shows tonight's projection, line, L5, season average, streak and a BET/PASS pill for every market. Below that are the full prop report for any market (form, matchup, risk, splits, alt lines, news) and the last 15 games, coloured green or red against their streak lines.
 * **UFC:**

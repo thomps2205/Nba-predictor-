@@ -1025,8 +1025,57 @@ def streaks_fragment(games: list[dict], slate: dict, inj: list[dict]) -> None:
          "goes (5+ games). Each line is the best round number for the run: long enough to matter, high enough to "
          "be worth playing. Proj = tonight's model projection — ⚠ means the model sees it falling short. "
          "Streaks end; this is history, not a guarantee.")
+    view = st.segmented_control("Streak view", ["🔥 Streaks", "🧩 Parlay builder"], default="🔥 Streaks",
+                                key=f"stk_view_{sport}", label_visibility="collapsed", width="stretch") or "🔥 Streaks"
+    if view == "🧩 Parlay builder":
+        streak_parlay(rows, proj, {g["id"]: g for g in chosen})
+        return
     render_streaks(rows, {g["id"]: g for g in chosen}, proj, sport,
                    ctx={"games": {g["id"]: g for g in chosen}, "slate": slate, "inj": inj, "rows": rows})
+
+
+def streak_parlay(rows: list[dict], proj: dict, games_by_id: dict) -> None:
+    """Build a parlay of any size from players on streaks in the selected games."""
+    players = {r["id"] for r in rows if r["kind"] == "player"}
+    if not players:
+        empty_card("No player streaks in these games yet.")
+        return
+    mk = [(m, lab) for m, lab in propmod.MARKETS.get(lg.kind, []) if any(r["m"] == m for r in rows)]
+    labs = dict(mk)
+    pick_m = st.pills("Markets", [m for m, _ in mk], default=[m for m, _ in mk], selection_mode="multi",
+                      key=f"spl_m_{sport}", format_func=labs.get, label_visibility="collapsed") or [m for m, _ in mk]
+    c1, c2 = st.columns(2)
+    min_k = c1.number_input("Min streak (games)", 5, 30, 5, 1, key=f"spl_k_{sport}")
+    skip_q = c2.toggle("Skip Questionable / DTD", True, key=f"spl_q_{sport}")
+    pool = streakmod.build_parlay(rows, proj, 10_000, set(pick_m), int(min_k), skip_q)
+    if len(pool) < 2:
+        empty_card("Not enough streak legs with these filters.", "Lower the minimum streak or add markets.")
+        return
+    n = 2 if len(pool) == 2 else st.slider(f"Legs (up to {len(pool)} players on streaks)", 2, len(pool),
+                                           min(5, len(pool)), 1, key=f"spl_n_{sport}_{len(pool)}")
+    picks = pool[:n]
+    p_all = streakmod.parlay_prob(picks)
+    n_games = len({x["gid"] for x in picks})
+    fair = decide.american(p_all) if 0.001 < p_all < 0.999 else "—"
+    H(f'<div class="card"><div class="ghead"><div class="pl-title">{n}-leg streak parlay'
+      f'<div class="psub">{n_games} game{"s" if n_games != 1 else ""} · one leg per player · safest lines first</div>'
+      f'</div><span class="badge {"strong" if p_all >= 0.3 else "lean" if p_all >= 0.1 else "muted"}">'
+      f'{p_all * 100:.1f}% to hit</span></div>'
+      f'<div class="ch-stats"><div><span class="num">{p_all * 100:.1f}%</span><span class="lbl">model hit chance</span></div>'
+      f'<div><span class="num">{fair}</span><span class="lbl">fair odds</span></div>'
+      f'<div><span class="num">{min(x["p"] for x in picks) * 100:.0f}%</span><span class="lbl">weakest leg</span></div></div>'
+      + "".join(
+          f'<div class="spl-leg">{avatar_html(x["headshot"], x["name"], 36)}<div class="spl-main">'
+          f'<div class="spl-pick">{esc(_short_name(x["name"]))} · <span class="ln">{_fmt_line(x["t"])}+ {esc(x["label"])}</span></div>'
+          f'<div class="spl-sub">{esc(x["team"])} {"vs" if x.get("home") else "@"} {esc(x["opp"])} · '
+          f'{x["k"]}/{x["k"]} straight · season {x["hits"]}/{x["n"]}'
+          + (f' · proj {x["proj"]:.1f}' if x.get("proj") == x.get("proj") and x.get("proj") is not None else "")
+          + f'</div></div><div class="spl-p"><span class="num">{x["p"] * 100:.0f}%</span>'
+            f'<span class="lbl">hit</span></div></div>' for x in picks)
+      + '<div class="pt-note">Each leg\'s chance blends how often the player cleared that line this season with '
+        'tonight\'s model projection (capped at 97%), and the parlay multiplies them. Streak lines are alt lines, '
+        'usually priced -300 to -1000 each, so compare the book\'s total price with the fair odds above. Legs in '
+        'the same game are treated as independent. Not betting advice.</div></div>')
 
 
 STK_COLORS = ["#3ddc84", "#a855f7", "#f59e0b", "#3b82f6", "#f43f5e", "#14b8a6", "#eab308", "#ec4899"]
