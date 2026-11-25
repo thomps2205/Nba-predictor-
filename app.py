@@ -1114,6 +1114,10 @@ def feedback_section(rows: list[dict], games_by_id: dict | None = None) -> None:
     if st.session_state.get("fb_graded_at") != bucket(10):
         st.session_state["fb_graded_at"] = bucket(10)
         fbmod.grade_pending(LEAGUES, grade.box_stats, grade.actual_value)
+    if not st.session_state.get(f"fb_pfix_{lg.key}"):
+        st.session_state[f"fb_pfix_{lg.key}"] = True
+        with st.spinner("Checking tracked legs…"):
+            fix_placeholder_p()
     all_rows = fbmod.load()
     cal = fbmod.calibration(all_rows)
     tot = cal.get("_all")
@@ -1205,7 +1209,9 @@ def feedback_section(rows: list[dict], games_by_id: dict | None = None) -> None:
                 badge = {"hit": "✅", "miss": "❌", "void": "➖"}.get(r.get("result"), "⏳")
                 act = f' · scored {r["actual"]:g}' if r.get("actual") is not None else ""
                 st.markdown(f'{badge} **{esc(r["name"])}** {_fmt_line(r["t"])}+ {esc(r.get("label", r["m"]))} · '
-                            f'{r["date"]} · said {r.get("p", 0) * 100:.0f}%{act}')
+                            f'{r.get("game_date") or r["date"]} · '
+                            + (f'said {r["p"] * 100:.0f}%' if r.get("p") else "no estimate")
+                            + f'{act}')
                 if not r.get("result"):
                     b1, b2, b3 = st.columns(3)
                     if b1.button("✅ Hit", key=f"fb_hit_{i}", width="stretch"):
@@ -1289,7 +1295,7 @@ def manual_leg_form(rows: list[dict], mk_lab: dict) -> None:
     if st.button("Add leg", key=f"fb_man_add_{sport}", width="stretch"):
         x = {**players[pid], "m": m, "t": float(t)}
         fbmod.add([{"sport": x["sport"], "gid": x["gid"], "pid": pid, "name": x["name"], "m": m,
-                    "label": mk_lab[m], "t": float(t), "p": _builder_p(rows, x), "tier": "manual",
+                    "label": mk_lab[m], "t": float(t), "p": _builder_p(rows, x, d), "tier": "manual", "p_src": "history",
                     "game_date": d.isoformat()}], "manual")
         idx = fbmod.find(pid, m, float(t))
         if res in ("hit", "miss") and idx is not None:
@@ -1298,17 +1304,57 @@ def manual_leg_form(rows: list[dict], mk_lab: dict) -> None:
         st.rerun()
 
 
-def _builder_p(rows: list[dict], x: dict) -> float:
-    """What the builder would have said for a leg: the matching streak row's chance, else its season hit rate."""
+def _builder_p(rows: list[dict], x: dict, game_date: date | None = None) -> float | None:
+    """What the builder would have said for a leg before its game: the matching streak row's chance when the leg
+    is on tonight's board, else the player's hit rate at that line in his games before that date (same smoothing
+    as the builder). None if no game log is available."""
     r = next((r for r in rows if r["kind"] == "player" and r["id"] == x["pid"] and r["m"] == x["m"]
               and r.get("t") == x["t"]), None)
-    if r is None:
-        r = next((r for r in rows if r["kind"] == "player" and r["id"] == x["pid"] and r["m"] == x["m"]), None)
-        if r is None or r.get("t") is None:
-            return 0.6
-        vals = r.get("last") or []
-        return round(min(0.97, (sum(v >= x["t"] for v in vals) + 1) / (len(vals) + 2)), 4)
-    return round(streakmod.leg_prob(r, None), 4)
+    if r is not None and game_date in (None, today_et):
+        return round(streakmod.leg_prob(r, None), 4)
+    return hist_p(x["pid"], x["m"], x["t"], game_date or today_et, x.get("gid"))
+
+
+def hist_p(pid: str, m: str, t: float, before: date, gid: str | None = None) -> float | None:
+    """Smoothed hit rate of `t+` in the player's games before the leg's game (season log from ESPN, cached).
+    With gid, the cutoff is that exact game, so its own result never leaks into the estimate."""
+    try:
+        raw = espn.cached_gamelog(lg, pid) or espn.athlete_gamelog(lg, pid)
+        logs = espn.parse_gamelog(raw, lg.kind, today_et + timedelta(days=1))
+    except Exception:
+        return None
+    hit = next((g for g in logs if gid and str(g.get("eid")) == str(gid)), None)
+    cutoff = hit["date"] if hit else before
+    logs = [g for g in logs if g["date"] < cutoff]
+    if lg.kind == "basketball":
+        logs = [g for g in logs if g.get("MIN", 1) > 0]
+    if len(logs) < 3:
+        return None
+    vals = [propmod.stat_value(lg.kind, m, g) for g in logs]
+    return round(min(0.97, (sum(v >= t for v in vals) + 1) / (len(vals) + 2)), 4)
+
+
+def fix_placeholder_p() -> int:
+    """Older hand-entered / screenshot legs were saved with a flat 60% placeholder: replace it with the real
+    pre-game hit rate (once per leg)."""
+    rows_ = fbmod.load()
+    n = 0
+    for r in rows_:
+        if r.get("sport") != lg.key or r.get("p_src") or r.get("source") not in ("manual", "screenshot"):
+            continue
+        if abs((r.get("p") or 0) - 0.6) > 1e-9:
+            r["p_src"] = "saved"
+            continue
+        try:
+            d = date.fromisoformat(r.get("game_date") or r.get("date"))
+        except Exception:
+            d = today_et
+        p = hist_p(str(r.get("pid")), r["m"], float(r["t"]), d - timedelta(days=1), r.get("gid"))
+        r["p"], r["p_src"] = (p, "history") if p is not None else (None, "none")
+        n += 1
+    if n:
+        fbmod.save(rows_)
+    return n
 
 
 STK_COLORS = ["#3ddc84", "#a855f7", "#f59e0b", "#3b82f6", "#f43f5e", "#14b8a6", "#eab308", "#ec4899"]
