@@ -34,13 +34,14 @@ import engine.ufc_props
 import engine.streaks
 import engine.challenge
 import engine.feedback
+import engine.learner
 import engine.decide
 import engine.report
 import engine.grade
 import engine.ui
 
 _ENGINE = [engine.common, engine.decide, engine.espn, engine.teams, engine.props, engine.streaks, engine.lines, engine.news, engine.ufc,
-           engine.ufc_props, engine.parlays, engine.challenge, engine.feedback, engine.ui, engine.report, engine.grade]  # dependency order
+           engine.ufc_props, engine.parlays, engine.challenge, engine.feedback, engine.learner, engine.ui, engine.report, engine.grade]  # dependency order
 
 
 @st.cache_resource(show_spinner=False)
@@ -64,7 +65,7 @@ def _refresh_engine() -> None:
 
 _refresh_engine()
 
-from engine import decide, grade, report, espn, lines as linesmod, news as newsmod, parlays, props as propmod, teams, streaks as streakmod, challenge as chmod, feedback as fbmod, ufc, ufc_props  # noqa: E402
+from engine import decide, grade, report, espn, lines as linesmod, news as newsmod, parlays, props as propmod, teams, streaks as streakmod, challenge as chmod, feedback as fbmod, learner as lrn, ufc, ufc_props  # noqa: E402
 from engine.common import ET, NOTES, cache_fresh, clear_disk_cache, fmt_spread, ml_to_prob, norm_name  # noqa: E402
 from engine.espn import LEAGUES, League  # noqa: E402
 from engine.ui import (CSS, H, avatar_html, edge_badge, empty_card, esc, ladder_html,  # noqa: E402
@@ -1051,8 +1052,22 @@ def streak_parlay(rows: list[dict], proj: dict, games_by_id: dict, slate_games: 
     min_k = c1.number_input("Min games in the run", 5, 30, 5, 1, key=f"spl_k_{sport}")
     skip_q = c2.toggle("Skip Questionable / DTD", True, key=f"spl_q_{sport}")
     tune = fbmod.factors(lg.key)
+    fb_rows = fbmod.load()
+    status = learner_status((len(fb_rows), sum(1 for r in fb_rows if r.get("result") in ("hit", "miss"))))
+    today_iso = today_et.isoformat()
+
+    def agree_of(r):
+        return fbmod.agreement(fb_rows, r["id"], r["m"], r["t"], today_iso)
+
+    def feat_of(r):
+        return lrn.feats_from_vals(r.get("vals") or r["last"], r["t"], "over", r["m"], proj.get((r["id"], r["m"])),
+                                   len(agree_of(r)))
+
+    def learn(r, p):
+        return lrn.predict(status, feat_of(r), p)
+
     pool = streakmod.build_parlay(rows, proj, 10_000, set(pick_m), int(min_k), skip_q,
-                                  {"100% only": 0.999, "90%+": 0.9, "80%+": 0.8}[rsel], tune)
+                                  {"100% only": 0.999, "90%+": 0.9, "80%+": 0.8}[rsel], tune, learn)
     if len(pool) < 2:
         empty_card("Not enough streak legs with these filters.", "Lower the minimum streak or add markets.")
         return
@@ -1076,6 +1091,7 @@ def streak_parlay(rows: list[dict], proj: dict, games_by_id: dict, slate_games: 
           + (f'{x["k"]}/{x["k"]} straight' if x.get("rate", 1) >= 0.999 else f'{x["wh"]}/{x["w"]} recent ({x["rate"] * 100:.0f}%)')
           + f' · season {x["hits"]}/{x["n"]}'
           + (f' · proj {x["proj"]:.1f}' if x.get("proj") == x.get("proj") and x.get("proj") is not None else "")
+          + (f' · <span class="ok">🤖 {esc(", ".join(agree_of(x)))}</span>' if agree_of(x) else "")
           + f'</div></div><div class="spl-p"><span class="num">{x["p"] * 100:.0f}%</span>'
             f'<span class="lbl">hit</span></div></div>' for x in picks)
       + '<div class="pt-note">Each leg\'s chance blends how often the player cleared that line this season with '
@@ -1085,8 +1101,10 @@ def streak_parlay(rows: list[dict], proj: dict, games_by_id: dict, slate_games: 
     if st.button(f"📌 Track this {n}-leg parlay (auto-grades when the games finish)", key=f"spl_track_{sport}",
                  width="stretch"):
         added = fbmod.add([{"sport": lg.key, "gid": x["gid"], "pid": x["id"], "name": x["name"], "m": x["m"],
-                            "label": x["label"], "t": x["t"], "p": round(x["p"], 4),
-                            "tier": "100%" if x.get("rate", 1) >= 0.999 else "80%+"} for x in picks], "builder")
+                            "label": x["label"], "t": x["t"], "p": round(x["p"], 4), "agree": len(agree_of(x)),
+                            "feat": feat_of(x), "game_date": today_iso,
+                            "tier": "100%" if x.get("rate", 1) >= 0.999 else "80%+"} for x in picks], "builder",
+                          today_iso)
         st.toast(f"Tracking {added} new leg{'s' if added != 1 else ''} — results tune the builder.")
     feedback_section(rows, games_by_id)
 
@@ -1140,6 +1158,8 @@ def feedback_section(rows: list[dict], games_by_id: dict | None = None) -> None:
         note("Track a parlay or upload a betslip — once legs are graded, the builder recalibrates its hit chances "
              "to how your legs actually land.")
 
+    learner_card()
+    import_ai_picks(games_by_id or {})
     with st.expander("📷 Upload a betslip screenshot"):
         up = st.file_uploader("Betslip image", type=["png", "jpg", "jpeg", "webp"], key=f"fb_up_{sport}",
                               label_visibility="collapsed")
@@ -1231,6 +1251,89 @@ def feedback_section(rows: list[dict], games_by_id: dict | None = None) -> None:
             st.error(f"Not a results backup ({e}).")
 
 
+def learner_card() -> None:
+    rows_ = fbmod.load()
+    stt = learner_status((len(rows_), sum(1 for r in rows_ if r.get("result") in ("hit", "miss"))))
+    mine = sum(1 for r in rows_ if r.get("feat") and r.get("result") in ("hit", "miss")
+               and not str(r.get("source", "")).startswith("ai:"))
+    ext = stt["n"] - mine
+    if not stt.get("brier_model"):
+        body = (f'<div class="pt-note" style="color:var(--text)">Learning: <b>{stt["n"]}/{stt["need"]}</b> graded legs '
+                f'({mine} yours · {ext} imported AI picks). It switches on once it has {stt["need"]} and beats the '
+                f'builder on legs it hasn\'t seen. Importing AI picks fills this up fastest.</div>'
+                f'<div class="ch-bar"><i style="width:{min(100, 100 * stt["n"] / stt["need"]):.0f}%"></i></div>')
+    else:
+        verdict = (f'<b>Active</b> · blended in at {stt["weight"] * 100:.0f}%' if stt["active"] else
+                   "<b>Not active yet</b> — it doesn't beat the builder on held-out legs, so picks are unchanged")
+        top = "".join(
+            f'<div class="factor"><span>{esc(k)}</span><span class="v {"pos" if v > 0 else "neg"}">'
+            f'{"↑ more hits" if v > 0 else "↓ fewer hits"}</span></div>' for k, v in stt.get("top", []))
+        body = (f'<div class="pt-note" style="color:var(--text)">{verdict}. Trained on {stt["n"]} graded legs '
+                f'({mine} yours · {ext} imported). Accuracy on unseen legs (Brier, lower is better): model '
+                f'{stt["brier_model"]:.3f} vs builder {stt["brier_base"]:.3f}.</div>'
+                f'<div class="sub-h">What it learned matters most</div>{top}')
+    H(f'<div class="card"><div class="sub-h" style="margin-top:0">🧠 Learning model</div>{body}</div>')
+    srcs = fbmod.source_stats(rows_)
+    if srcs:
+        H('<div class="card"><div class="sub-h" style="margin-top:0">🤖 AI sources you\'ve imported</div>' + "".join(
+            f'<div class="factor"><span>{esc(k)} · {v["n"]} graded</span><span class="v">'
+            f'{v["rate"] * 100:.0f}% hit</span></div>' for k, v in sorted(srcs.items(), key=lambda kv: -kv[1]["rate"]))
+          + '<div class="pt-note">When imported sources back a builder leg it shows 🤖 with their names, and the model '
+            'learns how much that agreement is worth.</div></div>')
+
+
+def import_ai_picks(games_by_id: dict) -> None:
+    """Paste picks from any AI / tipster source: matched to tonight's players, auto-graded, used for learning."""
+    with st.expander("📥 Import AI picks (any site, tweet or Discord)"):
+        src = st.text_input("Source name", key=f"ai_src_{sport}", placeholder="e.g. PropAI, Dimers, @someguy")
+        txt = st.text_area("Paste the picks — one per line", key=f"ai_txt_{sport}", height=140,
+                           placeholder="Jalen Brunson Over 24.5 Points\nUnder 8.5 Rebounds - Bam Adebayo\n"
+                                       "J. Williams 5+ AST")
+        up = st.file_uploader("…or a screenshot of their picks", type=["png", "jpg", "jpeg", "webp"],
+                              key=f"ai_img_{sport}")
+        if up is not None and fbmod.ocr_available():
+            try:
+                import pytesseract
+                from PIL import Image, ImageOps
+
+                txt = (txt or "") + "\n" + pytesseract.image_to_string(fbmod._prep(ImageOps.exif_transpose(Image.open(up))))
+            except Exception as e:
+                st.caption(f"Couldn't read the screenshot ({type(e).__name__}).")
+        elif up is not None:
+            st.caption("Screenshot reading isn't switched on on this server yet — paste the text instead.")
+        if not (txt or "").strip():
+            st.caption("Picks are graded automatically from the box scores, and each source's hit rate is tracked. "
+                       "Every graded pick also trains the 🧠 learning model.")
+            return
+        players = {}
+        for g in games_by_id.values():
+            players.update(game_players(g)[0])
+        found = fbmod.parse_picks(txt, list(players.values()))
+        if not found:
+            st.caption("No picks matched tonight's players — check the names / markets (Points, Rebounds, "
+                       "Assists, PRA, 3s aren't supported yet).")
+            return
+        mk_lab = dict(propmod.MARKETS.get(lg.kind, []))
+        st.caption(f"Matched {len(found)} pick{'s' if len(found) != 1 else ''}:")
+        for x in found:
+            st.markdown(f'• **{esc(x["name"])}** {x["side"].title()} {x["line"]:g} {esc(mk_lab.get(x["m"], x["m"]))}')
+        if st.button(f"Save {len(found)} picks from {src or 'this source'}", key=f"ai_save_{sport}",
+                     disabled=not src.strip(), width="stretch"):
+            legs = []
+            for x in found:
+                leg = {"sport": lg.key, "gid": x["gid"], "pid": x["pid"], "name": x["name"], "m": x["m"],
+                       "label": mk_lab.get(x["m"], x["m"]), "t": x["t"], "side": x["side"], "line": x["line"],
+                       "tier": "ai", "game_date": today_et.isoformat(), "source": f"ai:{src.strip()}"}
+                leg["feat"] = leg_feat(leg, today_et)
+                leg["p"] = lrn.base_p(leg["feat"]) if leg["feat"] else None
+                legs.append(leg)
+            n = fbmod.add(legs, f"ai:{src.strip()}", today_et.isoformat())
+            st.toast(f"Saved {n} picks from {src.strip()}.")
+            st.rerun()
+        if not src.strip():
+            st.caption("Name the source to save them.")
+
+
 def game_players(g: dict) -> tuple[dict, str]:
     """Players for one game: who actually played (box score), else both rosters. Returns (players, source)."""
     box = grade.box_stats(lg, g["id"]) if g.get("state") in ("in", "post") else {}
@@ -1315,9 +1418,9 @@ def _builder_p(rows: list[dict], x: dict, game_date: date | None = None) -> floa
     return hist_p(x["pid"], x["m"], x["t"], game_date or today_et, x.get("gid"))
 
 
-def hist_p(pid: str, m: str, t: float, before: date, gid: str | None = None) -> float | None:
-    """Smoothed hit rate of `t+` in the player's games before the leg's game (season log from ESPN, cached).
-    With gid, the cutoff is that exact game, so its own result never leaks into the estimate."""
+def hist_vals(pid: str, m: str, before: date, gid: str | None = None) -> list[float] | None:
+    """The player's stat in every game before the leg's game, newest first (ESPN season log, cached). With gid
+    the cutoff is that exact game, so its own result never leaks in."""
     try:
         raw = espn.cached_gamelog(lg, pid) or espn.athlete_gamelog(lg, pid)
         logs = espn.parse_gamelog(raw, lg.kind, today_et + timedelta(days=1))
@@ -1328,18 +1431,44 @@ def hist_p(pid: str, m: str, t: float, before: date, gid: str | None = None) -> 
     logs = [g for g in logs if g["date"] < cutoff]
     if lg.kind == "basketball":
         logs = [g for g in logs if g.get("MIN", 1) > 0]
-    if len(logs) < 3:
+    return [propmod.stat_value(lg.kind, m, g) for g in logs] if len(logs) >= 3 else None
+
+
+def hist_p(pid: str, m: str, t: float, before: date, gid: str | None = None) -> float | None:
+    """Smoothed hit rate of `t+` before the leg's game."""
+    vals = hist_vals(pid, m, before, gid)
+    if not vals:
         return None
-    vals = [propmod.stat_value(lg.kind, m, g) for g in logs]
     return round(min(0.97, (sum(v >= t for v in vals) + 1) / (len(vals) + 2)), 4)
+
+
+def leg_feat(r: dict, before: date | None = None) -> list[float] | None:
+    """Learner features for a saved leg, from the player's log before its game."""
+    d = before or (date.fromisoformat(r["game_date"]) if r.get("game_date") else
+                   date.fromisoformat(r.get("date", today_et.isoformat())))
+    vals = hist_vals(str(r.get("pid")), r["m"], d, r.get("gid"))
+    if not vals:
+        return None
+    return lrn.feats_from_vals(vals, float(r["t"]), r.get("side", "over"), r["m"],
+                               agree=int(r.get("agree", 0)), external=str(r.get("source", "")).startswith("ai:"),
+                               line=r.get("line"))
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def learner_status(sig: tuple) -> dict:
+    """Train on every graded leg with features (yours + imported AI picks). sig busts the cache on new results."""
+    return lrn.train(fbmod.load())
 
 
 def fix_placeholder_p() -> int:
     """Older hand-entered / screenshot legs were saved with a flat 60% placeholder: replace it with the real
-    pre-game hit rate (once per leg)."""
+    pre-game hit rate (once per leg). Also back-fills learner features on legs saved before the model existed."""
     rows_ = fbmod.load()
     n = 0
     for r in rows_:
+        if r.get("sport") == lg.key and "feat" not in r and r.get("m") and r.get("pid"):
+            r["feat"] = leg_feat(r, (date.fromisoformat(r["date"]) - timedelta(days=1)) if not r.get("gid") else None)
+            n += 1
         if r.get("sport") != lg.key or r.get("p_src") or r.get("source") not in ("manual", "screenshot"):
             continue
         if abs((r.get("p") or 0) - 0.6) > 1e-9:

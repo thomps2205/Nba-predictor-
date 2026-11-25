@@ -38,16 +38,17 @@ def save(rows: list[dict]) -> None:
 
 
 def _key(r: dict) -> str:
-    return f'{r.get("date")}|{r.get("sport")}|{r.get("pid") or norm_name(r.get("name", ""))}|{r.get("m")}|{r.get("t")}'
+    return (f'{r.get("date")}|{r.get("sport")}|{r.get("pid") or norm_name(r.get("name", ""))}|{r.get("m")}|'
+            f'{r.get("t")}|{r.get("side", "over")}|{r.get("source", "")}')
 
 
-def add(legs: list[dict], source: str) -> int:
+def add(legs: list[dict], source: str, day: str | None = None) -> int:
     """legs: {sport, gid, pid, name, m, label, t, p, tier}. Returns how many were new."""
     rows = load()
     have = {_key(r) for r in rows}
     n = 0
     for l in legs:
-        r = {"date": date.today().isoformat(), "result": None, "actual": None, "source": source,
+        r = {"date": day or date.today().isoformat(), "result": None, "actual": None, "source": source,
              "ts": time.time(), **l}
         if _key(r) not in have:
             rows.append(r)
@@ -101,7 +102,11 @@ def grade_pending(leagues: dict, box_stats, actual_value) -> int:
             r["result"] = "void"  # didn't play
         else:
             r["actual"] = val
-            r["result"] = "hit" if val >= r["t"] else "miss"
+            if r.get("side") == "under":
+                line = float(r.get("line", r["t"]))
+                r["result"] = "push" if val == line else ("hit" if val < line else "miss")
+            else:
+                r["result"] = "hit" if val >= r["t"] else "miss"
         r["graded_by"] = "box score"
         n += 1
     if n:
@@ -115,7 +120,8 @@ def grade_pending(leagues: dict, box_stats, actual_value) -> int:
 def calibration(rows: list[dict] | None = None) -> dict:
     """{"_all": stats, (sport, m): stats} with stats = n, hits, pred (mean predicted), actual, factor."""
     rows = load() if rows is None else rows
-    graded = [r for r in rows if r.get("result") in ("hit", "miss") and r.get("p")]
+    graded = [r for r in rows if r.get("result") in ("hit", "miss") and r.get("p")
+              and not str(r.get("source", "")).startswith("ai:")]  # calibrate the builder on YOUR legs
     groups: dict = {"_all": graded}
     for r in graded:
         groups.setdefault((r.get("sport"), r.get("m")), []).append(r)
@@ -237,3 +243,84 @@ def read_slip(img, players: list[dict]) -> list[dict]:
         out.append({**who, "m": m, "t": t, "status": _status_color(img, ln["top"], ln["bottom"], scale),
                     "text": text})
     return out
+
+
+# --------------------------------------------------------------------------
+# Imported AI / tipster picks
+# --------------------------------------------------------------------------
+_SIDE_OVER = re.compile(r"\bover\b|\bo\s?\d|\bmore\b|\bhigher\b", re.I)
+_SIDE_UNDER = re.compile(r"\bunder\b|\bu\s?\d|\bless\b|\blower\b", re.I)
+
+
+def parse_picks(text: str, players: list[dict]) -> list[dict]:
+    """Free text from any AI pick source -> legs. One pick per line, any common wording:
+    "Jalen Brunson Over 24.5 Points", "Brunson o24.5 pts", "J. Brunson 25+ PTS", "Under 8.5 Reb - Bam Adebayo".
+    players: [{name, pid, sport, gid}]. Returns [{..player, m, side, t, line, text}]."""
+    by_last: dict = {}
+    for p in players:
+        parts = norm_name(p["name"]).split()
+        if parts:
+            by_last.setdefault(parts[-1], []).append(p)
+    out, seen = [], set()
+    for raw in re.split(r"[\n;]+", text or ""):
+        line_txt = raw.strip()
+        if not line_txt:
+            continue
+        low = norm_name(line_txt)
+        who = None
+        for last, cands in by_last.items():
+            if re.search(rf"\b{re.escape(last)}\b", low):
+                toks = low.split()
+                first = [c for c in cands if norm_name(c["name"]).split()[0] in toks] or \
+                        [c for c in cands if norm_name(c["name"])[:1] in toks]
+                who = (first or cands)[0]
+                break
+        m = next((code for code, pat in MARKET_WORDS if re.search(pat, line_txt, re.I)), None)
+        if not (who and m):
+            continue
+        plus = re.search(r"(\d+(?:\.\d+)?)\s*\+", line_txt)
+        num = plus or re.search(r"(?:over|under|o|u)\s*(\d+(?:\.\d+)?)", line_txt, re.I) or \
+            re.search(r"(\d+(?:\.\d+)?)", re.sub(r"[+-]\d{3,}", " ", line_txt))
+        if not num:
+            continue
+        val = float(num.group(1))
+        under = not plus and bool(_SIDE_UNDER.search(line_txt)) and not _SIDE_OVER.search(line_txt)
+        if plus:
+            side, t, line = "over", val, val - 0.5
+        elif under:
+            side, t, line = "under", val, val
+        else:  # over L -> clears at floor(L) + 1
+            side, line = "over", val
+            t = float(int(val) + 1)  # "over 24.5" and "over 24" both need 25+
+        key = (who["pid"], m, side, line)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({**who, "m": m, "side": side, "t": t, "line": line, "text": line_txt})
+    return out
+
+
+def source_stats(rows: list[dict] | None = None) -> dict:
+    """{source name: {n, hits, rate}} for imported AI picks (graded only)."""
+    rows = load() if rows is None else rows
+    out: dict = {}
+    for r in rows:
+        src = str(r.get("source", ""))
+        if not src.startswith("ai:") or r.get("result") not in ("hit", "miss"):
+            continue
+        d = out.setdefault(src[3:], {"n": 0, "hits": 0})
+        d["n"] += 1
+        d["hits"] += r["result"] == "hit"
+    for d in out.values():
+        d["rate"] = d["hits"] / d["n"] if d["n"] else 0.0
+    return out
+
+
+def agreement(rows: list[dict], pid: str, m: str, t: float, day: str) -> list[str]:
+    """Imported AI sources that picked this player/market on the over at a line no higher than t, today."""
+    srcs = set()
+    for r in rows:
+        if (str(r.get("source", "")).startswith("ai:") and str(r.get("pid")) == str(pid) and r.get("m") == m
+                and r.get("side", "over") == "over" and r.get("date") == day and float(r.get("t", 99)) <= t + 0.5):
+            srcs.add(str(r["source"])[3:])
+    return sorted(srcs)

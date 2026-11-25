@@ -132,7 +132,7 @@ def player_streaks(lg, game: dict, inj_all: list[dict]) -> list[dict]:
                     out.append(_norm({**s, "kind": "player", "m": m, "label": label, "name": a["name"], "id": a["id"],
                             "team": team["abbr"], "opp": opp["abbr"], "home": side == "home", "gid": game["id"],
                             "headshot": a.get("headshot") or "", "logo": team.get("logo", ""),
-                            "status": status if cls not in ("", "ACTIVE") else "", "last": vals[:10],
+                            "status": status if cls not in ("", "ACTIVE") else "", "last": vals[:10], "vals": vals,
                             "opps": [r.get("opp", "") for r in logs[:10]],
                             "dates": [f'{r["date"].month}/{r["date"].day}' for r in logs[:10]]}))
     return out
@@ -232,7 +232,8 @@ def leg_prob(r: dict, proj: float | None) -> float:
 
 
 def build_parlay(rows: list[dict], proj: dict, legs: int, markets: set[str] | None = None, min_k: int = 5,
-                 skip_questionable: bool = True, min_rate: float = 1.0, tune: dict | None = None) -> list[dict]:
+                 skip_questionable: bool = True, min_rate: float = 1.0, tune: dict | None = None,
+                 learn=None) -> list[dict]:
     """The `legs` most likely streak legs: one per player (his likeliest line), any game tonight.
     min_k = minimum window (games), min_rate = minimum hit rate in that window (1.0 = perfect streaks only)."""
     best: dict[str, dict] = {}
@@ -245,6 +246,8 @@ def build_parlay(rows: list[dict], proj: dict, legs: int, markets: set[str] | No
         p = leg_prob(r, proj.get((r["id"], r["m"])))
         if tune:  # calibration from your graded results (engine.feedback)
             p = min(0.97, p * tune.get(r["m"], tune.get("_default", 1.0)))
+        if learn is not None:  # learned model from graded legs (engine.learner), blended in
+            p = learn(r, p)
         if r["id"] not in best or p > best[r["id"]]["p"]:
             best[r["id"]] = {**r, "p": p, "proj": proj.get((r["id"], r["m"]))}
     picks = sorted(best.values(), key=lambda x: (-x["p"], -x.get("w", x["k"])))
