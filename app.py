@@ -2038,6 +2038,8 @@ def render_challenge() -> None:
     hero(f"{today_et:%a, %b %d}<br>Bankroll challenge")
     note("Roll a small bankroll into a target, one bet a day — like the \"$50 to $10k\" challenges. Every bet "
          "rides the bankroll, so one loss ends it: the app shows the real odds of finishing at every step.")
+    if "ch_name_next" in st.session_state:  # a restart plan was just created: open it
+        st.session_state["ch_name"] = st.session_state.pop("ch_name_next")
     name = st.text_input("Challenge name", key="ch_name", placeholder="Name your challenge (e.g. xmas-25k)",
                          label_visibility="collapsed").strip()
     ch = chmod.load(name) if name else None
@@ -2072,7 +2074,7 @@ def render_challenge() -> None:
     progress_card(ch, bank, stat)
     pend = chmod.pending(ch)
     if stat == "busted":
-        empty_card("Challenge over — a loss took the bankroll.", "Start a new one under a different name.")
+        restart_card(ch)
     elif stat == "complete":
         H('<div class="card"><div class="verdict bet"><span class="vpill bet">🏆 DONE</span><span class="vtxt">'
           f'<b>Target hit: {_money(bank)}</b> in {sum(b["result"] == "won" for b in ch["bets"])} wins.</span></div></div>')
@@ -2125,6 +2127,30 @@ def render_challenge() -> None:
     note("Challenges are saved on the app server under their name. Streamlit Cloud can wipe that storage when the "
          "app restarts or redeploys — tap Backup after each bet and restore it from the setup screen if needed. "
          "Gamble responsibly: only stake what you can afford to lose (1-800-GAMBLER).")
+
+
+def restart_card(ch: dict) -> None:
+    lost = next((b for b in reversed(ch["bets"]) if b["result"] == "lost"), {})
+    H(f'<div class="card"><div class="sub-h" style="margin-top:0">Challenge over — what now?</div>'
+      f'<div class="pt-note" style="font-size:.78rem;color:var(--text)">{esc(chmod.loss_note(lost))}</div></div>'
+      '<div class="sub-h">Easier ways to get the win</div>')
+    for i, pl in enumerate(chmod.restart_plans(ch)):
+        finish = (f' · finish chance ≈ {_pct_small(pl["finish"])} at fair odds' if pl["finish"] is not None
+                  else " · survives losses (each one halves the stake base)")
+        H(f'<div class="card"><div class="ghead"><div class="pl-title">{esc(pl["title"])}'
+          f'<div class="psub">{_money(pl["start"])} → {_money(pl["target"])} · {pl["days"]} bets · '
+          f'{pl["rollover"] * 100:.0f}% rollover</div></div>'
+          f'<span class="badge strong">{chmod.american(pl["need"])} / bet</span></div>'
+          f'<div class="pt-note" style="color:var(--text)">{esc(pl["why"])}</div>'
+          f'<div class="pt-note">Each bet needs to hit about {pl["p_bet"] * 100:.0f}% of the time'
+          f'{finish}.</div></div>')
+        if st.button(f"Start: {pl['title'].lower()}", key=f"ch_restart_{i}", width="stretch"):
+            name = chmod.unique_name(ch["name"])
+            chmod.save(chmod.new(name, pl["start"], pl["target"], pl["days"], pl["rollover"]))
+            st.session_state["ch_name_next"] = name
+            st.rerun()
+    note("Over many tries, the sportsbook's margin works against every plan — smaller targets and cushions "
+         "just make each run last longer and finish more often. Only play with money you're fine losing.")
 
 
 def challenge_math(start: float, target: float, days: int, roll: float) -> None:

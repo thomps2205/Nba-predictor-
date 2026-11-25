@@ -183,6 +183,13 @@ streamlit run app.py
   * **Each day:** turn on the scan. It searches today's whole board (game lines, player props and UFC fights across every sport) for the most likely single or 2-leg parlay that pays at least the odds this step needs. It shows a best pick and two alternatives, each with its hit %, the hit % the price implies, the payout and a +EV/−EV tag.
   * **Tracking:** lock a pick in (or log your own bet), then mark it Won, Lost or Push. You see the bankroll, the win streak, the bets left, a progress bar to the target, the odds needed to stay on pace, and the history.
   * **Stakes:** a "Stake the full bankroll" toggle (or a custom amount) applies before you lock in each bet. A pending bet's stake can be changed with "✏️ Change stake" or the 💰 Full bankroll button. Rollover %, target and bets/days can be edited later under "⚙️ Challenge settings".
+  * **After a loss:** a busted challenge explains the loss (e.g. "that bet had about a 62% chance — it still loses roughly 1 time in 3"). It then offers four easier restarts, each with a one-tap Start button that opens the new run as "name (retry 2)":
+    * **Slower pace:** more bets, so each one can be a safer price.
+    * **Smaller target:** a reachable first milestone.
+    * **Cushion:** 50% rollover, so a loss halves the bankroll instead of ending the run.
+    * **Streak ladder:** many small steps using 100% streak lines.
+
+    Each option shows the odds every bet needs, the hit rate those odds imply, and the chance of finishing.
   * **Saving:** challenges are saved on the server by name. You can also download a .json backup and restore it, because Streamlit Cloud can wipe storage on redeploy.
 * **🔥 Streaks tab** for NBA, NCAAB, NFL, NHL, Soccer and UFC. It lists hit-rate streaks: the line each player has cleared in every one of their recent games, shown as "D. Bane · 15+ Points · 9/9".
   * **Choosing the line:** the candidate lines are the lowest values of the last 5, 6, … games. Each is scored by streak length × (line ÷ season average)², and lines below a per-market minimum are skipped. That way a trivial 4+ points can't win just because it never missed.

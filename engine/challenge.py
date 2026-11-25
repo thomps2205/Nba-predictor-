@@ -194,3 +194,52 @@ def survival(probs: list[float]) -> float:
     for p in probs:
         out *= p
     return out
+
+
+# --------------------------------------------------------------------------
+# After a bust: easier ways to restart
+# --------------------------------------------------------------------------
+def unique_name(base: str) -> str:
+    root = re.sub(r"\s*\(retry \d+\)$", "", base.strip())
+    for i in range(2, 100):
+        name = f"{root} (retry {i})"
+        if load(name) is None:
+            return name
+    return f"{root} (retry {int(time.time())})"
+
+
+def restart_plans(ch: dict) -> list[dict]:
+    """Easier variants of a busted challenge. Each: title, why, start, target, days, rollover, need (decimal
+    odds per bet) and finish (chance to win every needed bet at fair odds; full rollover only)."""
+    start, target, days, roll = ch["start"], ch["target"], ch["days"], ch["rollover"]
+    plans = []
+
+    def add(title, why, tgt, d, r):
+        need = per_bet_multiplier(start, tgt, d, r)
+        plans.append({"title": title, "why": why, "start": start, "target": round(tgt, 2), "days": int(d),
+                      "rollover": r, "need": need, "p_bet": 1 / need,
+                      "finish": (start / tgt) if r >= 0.999 else None})
+
+    more = min(100, max(days + 5, days * 2))
+    add("Slower pace", f"Same {fmt_money(target)} goal over {more} bets — every bet can be a safer price.",
+        target, more, 1.0)
+    small = max(start * 2, min(target / 10, start * 20))
+    add("Smaller target", f"Aim for {fmt_money(small)} first; if it lands, start the next leg from there.",
+        small, max(5, days // 2), 1.0)
+    add("Cushion (50% rollover)", "Stake half the bankroll each bet — one loss halves it instead of ending it.",
+        target, more, 0.5)
+    add("Streak-ladder run", "Use only 100% streak lines (singles / 2-leg) from the Streaks tab at about "
+        "-300 each — many small, high-hit steps.", min(target, start * 50), 30, 1.0)
+    return plans
+
+
+def loss_note(bet: dict) -> str:
+    p = bet.get("prob")
+    if not p:
+        return "One loss ends a full-rollover run — that's the catch with every challenge like this."
+    return (f"That bet had about a {p * 100:.0f}% chance — it still loses roughly 1 time in {1 / (1 - p):.0f}. "
+            "A good pick can lose; with full rollover one loss ends the run, so the fix is the structure, not the pick.")
+
+
+def fmt_money(x: float) -> str:
+    return f"${x:,.2f}" if x < 1000 else f"${x:,.0f}"
