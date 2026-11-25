@@ -3,3 +3,5 @@ nba_api>=1.10.0
 pandas>=2.1
 numpy>=1.26
 requests>=2.31
+pytesseract>=0.3.10
+Pillow>=10.0

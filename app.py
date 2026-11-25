@@ -33,13 +33,14 @@ import engine.ufc
 import engine.ufc_props
 import engine.streaks
 import engine.challenge
+import engine.feedback
 import engine.decide
 import engine.report
 import engine.grade
 import engine.ui
 
 _ENGINE = [engine.common, engine.decide, engine.espn, engine.teams, engine.props, engine.streaks, engine.lines, engine.news, engine.ufc,
-           engine.ufc_props, engine.parlays, engine.challenge, engine.ui, engine.report, engine.grade]  # dependency order
+           engine.ufc_props, engine.parlays, engine.challenge, engine.feedback, engine.ui, engine.report, engine.grade]  # dependency order
 
 
 @st.cache_resource(show_spinner=False)
@@ -63,7 +64,7 @@ def _refresh_engine() -> None:
 
 _refresh_engine()
 
-from engine import decide, grade, report, espn, lines as linesmod, news as newsmod, parlays, props as propmod, teams, streaks as streakmod, challenge as chmod, ufc, ufc_props  # noqa: E402
+from engine import decide, grade, report, espn, lines as linesmod, news as newsmod, parlays, props as propmod, teams, streaks as streakmod, challenge as chmod, feedback as fbmod, ufc, ufc_props  # noqa: E402
 from engine.common import ET, NOTES, cache_fresh, clear_disk_cache, fmt_spread, ml_to_prob, norm_name  # noqa: E402
 from engine.espn import LEAGUES, League  # noqa: E402
 from engine.ui import (CSS, H, avatar_html, edge_badge, empty_card, esc, ladder_html,  # noqa: E402
@@ -1049,8 +1050,9 @@ def streak_parlay(rows: list[dict], proj: dict, games_by_id: dict) -> None:
     c1, c2 = st.columns(2)
     min_k = c1.number_input("Min games in the run", 5, 30, 5, 1, key=f"spl_k_{sport}")
     skip_q = c2.toggle("Skip Questionable / DTD", True, key=f"spl_q_{sport}")
+    tune = fbmod.factors(lg.key)
     pool = streakmod.build_parlay(rows, proj, 10_000, set(pick_m), int(min_k), skip_q,
-                                  {"100% only": 0.999, "90%+": 0.9, "80%+": 0.8}[rsel])
+                                  {"100% only": 0.999, "90%+": 0.9, "80%+": 0.8}[rsel], tune)
     if len(pool) < 2:
         empty_card("Not enough streak legs with these filters.", "Lower the minimum streak or add markets.")
         return
@@ -1080,6 +1082,143 @@ def streak_parlay(rows: list[dict], proj: dict, games_by_id: dict) -> None:
         'tonight\'s model projection (capped at 97%), and the parlay multiplies them. Streak lines are alt lines, '
         'usually priced -300 to -1000 each, so compare the book\'s total price with the fair odds above. Legs in '
         'the same game are treated as independent. Not betting advice.</div></div>')
+    if st.button(f"📌 Track this {n}-leg parlay (auto-grades when the games finish)", key=f"spl_track_{sport}",
+                 width="stretch"):
+        added = fbmod.add([{"sport": lg.key, "gid": x["gid"], "pid": x["id"], "name": x["name"], "m": x["m"],
+                            "label": x["label"], "t": x["t"], "p": round(x["p"], 4),
+                            "tier": "100%" if x.get("rate", 1) >= 0.999 else "80%+"} for x in picks], "builder")
+        st.toast(f"Tracking {added} new leg{'s' if added != 1 else ''} — results tune the builder.")
+    feedback_section(rows)
+
+
+def feedback_section(rows: list[dict]) -> None:
+    """Your tracked legs: auto-graded from box scores, betslip screenshots, and the calibration they produce."""
+    from datetime import date as _date
+
+    H('<div class="sub-h">📈 Your results · tunes the builder</div>')
+    if st.session_state.get("fb_graded_at") != bucket(10):
+        st.session_state["fb_graded_at"] = bucket(10)
+        fbmod.grade_pending(LEAGUES, grade.box_stats, grade.actual_value)
+    all_rows = fbmod.load()
+    cal = fbmod.calibration(all_rows)
+    tot = cal.get("_all")
+    mk_lab = dict(propmod.MARKETS.get(lg.kind, []))
+    if tot:
+        f = fbmod.factors(lg.key, cal)
+        per = "".join(
+            f'<div class="factor"><span>{esc(mk_lab.get(k[1], k[1]))} · {v["n"]} legs</span><span class="v">'
+            f'said {v["pred"] * 100:.0f}% · hit {v["actual"] * 100:.0f}% → ×{v["factor"]:.2f}</span></div>'
+            for k, v in cal.items() if isinstance(k, tuple) and k[0] == lg.key)
+        H(f'<div class="card"><div class="ch-stats"><div><span class="num">{tot["n"]}</span>'
+          f'<span class="lbl">legs graded</span></div><div><span class="num">{tot["pred"] * 100:.0f}%</span>'
+          f'<span class="lbl">builder said</span></div><div><span class="num">{tot["actual"] * 100:.0f}%</span>'
+          f'<span class="lbl">actually hit</span></div></div>{per}'
+          f'<div class="pt-note">The builder now multiplies each {esc(lg.key)} leg by '
+          f'×{f.get("_default", 1):.2f} (or its market\'s factor once that market has {fbmod.MIN_N}+ graded legs). '
+          f'Factors lean on your results more as they add up, and stay between ×{fbmod.FACTOR_RANGE[0]:.2f} '
+          f'and ×{fbmod.FACTOR_RANGE[1]:.2f}.</div></div>')
+    else:
+        note("Track a parlay or upload a betslip — once legs are graded, the builder recalibrates its hit chances "
+             "to how your legs actually land.")
+
+    with st.expander("📷 Upload a betslip screenshot"):
+        up = st.file_uploader("Betslip image", type=["png", "jpg", "jpeg", "webp"], key=f"fb_up_{sport}",
+                              label_visibility="collapsed")
+        players = {r["id"]: {"name": r["name"], "pid": r["id"], "sport": lg.key, "gid": r["gid"]}
+                   for r in rows if r["kind"] == "player"}
+        if up is not None:
+            from PIL import Image
+
+            img = Image.open(up)
+            st.image(img, width=240)
+            found = []
+            if fbmod.ocr_available():
+                try:
+                    found = fbmod.read_slip(img, list(players.values()))
+                except Exception as e:
+                    st.caption(f"Couldn't read the image ({type(e).__name__}).")
+            else:
+                st.caption("Screenshot reading (OCR) isn't installed on this server yet — add the legs below.")
+            if found:
+                st.caption(f"Found {len(found)} leg{'s' if len(found) != 1 else ''} — check the results, then save.")
+                pick = []
+                for i, x in enumerate(found):
+                    opts = ["hit", "miss", "not settled"]
+                    d = opts.index(x["status"]) if x["status"] in opts else 2
+                    res = st.segmented_control(f'{x["name"]} · {_fmt_line(x["t"])}+ {mk_lab.get(x["m"], x["m"])}',
+                                               opts, default=opts[d], key=f"fb_ocr_{i}") or opts[d]
+                    pick.append((x, res))
+                if st.button("Save these legs", key="fb_ocr_save", width="stretch"):
+                    legs = []
+                    for x, res in pick:
+                        legs.append({"sport": x["sport"], "gid": x["gid"], "pid": x["pid"], "name": x["name"],
+                                     "m": x["m"], "label": mk_lab.get(x["m"], x["m"]), "t": x["t"],
+                                     "p": _builder_p(rows, x), "tier": "slip"})
+                    fbmod.add(legs, "screenshot")
+                    for x, res in pick:
+                        idx = fbmod.find(x["pid"], x["m"], x["t"])
+                        if res in ("hit", "miss") and idx is not None:
+                            fbmod.set_result(idx, res)
+                    st.rerun()
+        st.caption("Or add a leg by hand:")
+        if players:
+            pids = list(players)
+            c1, c2 = st.columns(2)
+            pid = c1.selectbox("Player", pids, format_func=lambda i: players[i]["name"], key=f"fb_man_p_{sport}")
+            m = c2.selectbox("Market", list(mk_lab), format_func=mk_lab.get, key=f"fb_man_m_{sport}")
+            c3, c4 = st.columns(2)
+            t = c3.number_input("Line (N+)", 0.5, 600.0, 5.0, 0.5, key=f"fb_man_t_{sport}")
+            res = c4.segmented_control("Result", ["hit", "miss", "not settled"], default="not settled",
+                                       key=f"fb_man_r_{sport}") or "not settled"
+            if st.button("Add leg", key=f"fb_man_add_{sport}", width="stretch"):
+                x = {**players[pid], "m": m, "t": float(t)}
+                fbmod.add([{"sport": x["sport"], "gid": x["gid"], "pid": pid, "name": x["name"], "m": m,
+                            "label": mk_lab[m], "t": float(t), "p": _builder_p(rows, x), "tier": "manual"}], "manual")
+                idx = fbmod.find(pid, m, float(t))
+                if res in ("hit", "miss") and idx is not None:
+                    fbmod.set_result(idx, res)
+                st.rerun()
+
+    mine = [(i, r) for i, r in enumerate(all_rows) if r.get("sport") == lg.key]
+    if mine:
+        open_ = [(i, r) for i, r in mine if not r.get("result")]
+        done = [(i, r) for i, r in mine if r.get("result")][-12:]
+        with st.expander(f"Tracked legs · {len(open_)} waiting · {len([1 for _, r in mine if r.get('result') in ('hit', 'miss')])} graded"):
+            for i, r in reversed(open_ + done):
+                badge = {"hit": "✅", "miss": "❌", "void": "➖"}.get(r.get("result"), "⏳")
+                act = f' · scored {r["actual"]:g}' if r.get("actual") is not None else ""
+                st.markdown(f'{badge} **{esc(r["name"])}** {_fmt_line(r["t"])}+ {esc(r.get("label", r["m"]))} · '
+                            f'{r["date"]} · said {r.get("p", 0) * 100:.0f}%{act}')
+                if not r.get("result"):
+                    b1, b2, b3 = st.columns(3)
+                    if b1.button("✅ Hit", key=f"fb_hit_{i}", width="stretch"):
+                        fbmod.set_result(i, "hit"); st.rerun()
+                    if b2.button("❌ Miss", key=f"fb_miss_{i}", width="stretch"):
+                        fbmod.set_result(i, "miss"); st.rerun()
+                    if b3.button("🗑", key=f"fb_del_{i}", width="stretch"):
+                        fbmod.remove(i); st.rerun()
+            st.download_button("⬇ Backup results (.json)", json.dumps(all_rows, indent=1), "sharpboard-results.json",
+                               "application/json", key=f"fb_dl_{sport}", width="stretch")
+    up2 = st.file_uploader("Restore results backup", type=["json"], key=f"fb_restore_{sport}")
+    if up2 is not None:
+        try:
+            fbmod.save(json.loads(up2.getvalue()))
+            st.toast("Results restored.")
+        except Exception as e:
+            st.error(f"Not a results backup ({e}).")
+
+
+def _builder_p(rows: list[dict], x: dict) -> float:
+    """What the builder would have said for a leg: the matching streak row's chance, else its season hit rate."""
+    r = next((r for r in rows if r["kind"] == "player" and r["id"] == x["pid"] and r["m"] == x["m"]
+              and r.get("t") == x["t"]), None)
+    if r is None:
+        r = next((r for r in rows if r["kind"] == "player" and r["id"] == x["pid"] and r["m"] == x["m"]), None)
+        if r is None or r.get("t") is None:
+            return 0.6
+        vals = r.get("last") or []
+        return round(min(0.97, (sum(v >= x["t"] for v in vals) + 1) / (len(vals) + 2)), 4)
+    return round(streakmod.leg_prob(r, None), 4)
 
 
 STK_COLORS = ["#3ddc84", "#a855f7", "#f59e0b", "#3b82f6", "#f43f5e", "#14b8a6", "#eab308", "#ec4899"]
