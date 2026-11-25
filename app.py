@@ -1139,20 +1139,40 @@ def feedback_section(rows: list[dict], games_by_id: dict | None = None) -> None:
     with st.expander("📷 Upload a betslip screenshot"):
         up = st.file_uploader("Betslip image", type=["png", "jpg", "jpeg", "webp"], key=f"fb_up_{sport}",
                               label_visibility="collapsed")
-        players = played_tonight(list((games_by_id or {}).values()))
+        recent = list((games_by_id or {}).values())
+        try:  # last night's games too (after midnight the slate date has already rolled over)
+            seen = {g["id"] for g in recent}
+            recent += [g for g in fetch_games(sport, sel_date - timedelta(days=1)) if g["id"] not in seen]
+        except Exception:
+            pass
+        players = played_tonight(recent)
+        if not players:  # nobody has played yet: fall back to tonight's rosters so entry is never blocked
+            players = {r["id"]: {"name": r["name"], "pid": r["id"], "sport": lg.key, "gid": r["gid"],
+                                 "team": r["team"], "final": False, "pre": True}
+                       for r in rows if r["kind"] == "player"}
         if up is not None:
-            from PIL import Image
+            from PIL import Image, ImageOps
 
-            img = Image.open(up)
-            st.image(img, width=240)
             found = []
-            if fbmod.ocr_available():
-                try:
-                    found = fbmod.read_slip(img, list(players.values()))
-                except Exception as e:
-                    st.caption(f"Couldn't read the image ({type(e).__name__}).")
-            else:
-                st.caption("Screenshot reading (OCR) isn't installed on this server yet — add the legs below.")
+            try:
+                img = ImageOps.exif_transpose(Image.open(up))
+                st.image(img, width=240)
+            except Exception as e:
+                img = None
+                st.warning(f"Couldn't open that image ({type(e).__name__}) — try a PNG or JPG screenshot.")
+            if img is not None and fbmod.ocr_available():
+                with st.spinner("Reading the betslip…"):
+                    try:
+                        found = fbmod.read_slip(img, list(players.values()))
+                    except Exception as e:
+                        st.caption(f"Couldn't read the image ({type(e).__name__}).")
+                if not found:
+                    st.info("Couldn't match any legs on this slip to last night's or tonight's players — "
+                            "add them below (it takes a few seconds per leg).")
+            elif img is not None:
+                st.info("Screenshot reading isn't switched on yet on this server. If the app was just updated, "
+                        "open Manage app → ⋮ → Reboot app once so Streamlit installs the OCR package. Meanwhile, "
+                        "add the legs below.")
             if found:
                 st.caption(f"Found {len(found)} leg{'s' if len(found) != 1 else ''} — check the results, then save.")
                 pick = []
@@ -1174,15 +1194,15 @@ def feedback_section(rows: list[dict], games_by_id: dict | None = None) -> None:
                         if res in ("hit", "miss") and idx is not None:
                             fbmod.set_result(idx, res)
                     st.rerun()
-        st.caption("Or add a leg by hand (players who have played tonight):")
-        if not players:
-            st.caption("No one has played yet tonight — players show up here once their game tips off.")
+        pre = any(v.get("pre") for v in players.values())
+        st.caption("Or add a leg by hand — " + ("tonight's rosters (no one has played yet):" if pre else
+                   "players who played last night or tonight:"))
         if players:
             pids = list(players)
             c1, c2 = st.columns(2)
             pid = c1.selectbox("Player", pids, key=f"fb_man_p_{sport}",
                                format_func=lambda i: f'{players[i]["name"]} · {players[i]["team"]}'
-                               + ("" if players[i]["final"] else " (live)"))
+                               + ("" if players[i]["final"] or players[i].get("pre") else " (live)"))
             m = c2.selectbox("Market", list(mk_lab), format_func=mk_lab.get, key=f"fb_man_m_{sport}")
             c3, c4 = st.columns(2)
             t = c3.number_input("Line (N+)", 0.5, 600.0, 5.0, 0.5, key=f"fb_man_t_{sport}")
