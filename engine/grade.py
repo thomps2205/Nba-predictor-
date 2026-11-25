@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .common import disk_cached, made_att, num, to_minutes
+from .common import cache_fresh, cache_read, cache_write, made_att, num, to_minutes
 from .espn import SITE, League, http_json
 
 TTL_FINAL_BOX = 30 * 24 * 3600  # a final box score never changes
@@ -20,7 +20,10 @@ LABEL_OK = {"basketball", "hockey"}
 def _fetch_box(lg: League, event_id: str) -> dict:
     raw = http_json(f"{SITE}/{lg.sport}/{lg.league}/summary", {"event": event_id}, retries=1)
     out: dict[str, dict] = {}
+    st = (((raw.get("header") or {}).get("competitions") or [{}])[0].get("status") or {}).get("type") or {}
+    out["_final"] = bool(st.get("completed")) or st.get("state") == "post"
     for team in (raw.get("boxscore") or {}).get("players", []) or []:
+        abbr = (team.get("team") or {}).get("abbreviation", "")
         for blk in team.get("statistics", []) or []:
             keys = [str(k).lower() for k in (blk.get("keys") or blk.get("names") or [])]
             labels = [str(k).lower() for k in (blk.get("labels") or blk.get("names") or [])]
@@ -29,7 +32,9 @@ def _fetch_box(lg: League, event_id: str) -> dict:
                 stats = ath.get("stats") or []
                 if not aid or not stats:
                     continue
-                row = out.setdefault(aid, {"_dnp": bool(ath.get("didNotPlay"))})
+                row = out.setdefault(aid, {"_dnp": bool(ath.get("didNotPlay")),
+                                           "_name": (ath.get("athlete") or {}).get("displayName", ""),
+                                           "_team": abbr})
                 for i, v in enumerate(stats):
                     for name in {keys[i] if i < len(keys) else None, labels[i] if i < len(labels) else None}:
                         if name and name not in row:
@@ -43,12 +48,31 @@ def _fetch_box(lg: League, event_id: str) -> dict:
     return out
 
 
+TTL_LIVE_BOX = 120  # in-progress games: refresh every 2 minutes
+
+
 def box_stats(lg: League, event_id: str) -> dict[str, dict]:
-    """{athlete_id: {stat key: value}} from the final box score; {} if unavailable."""
+    """{athlete_id: {stat key: value}} from the box score, plus "_final" (game over). A final box score is
+    cached for 30 days; a live one for 2 minutes. {} if unavailable."""
+    key = f"box2|{lg.key}|{event_id}"
+    cached = cache_read(key)
+    if cached is not None and (cached.get("_final") and cache_fresh(key, TTL_FINAL_BOX)
+                               or cache_fresh(key, TTL_LIVE_BOX)):
+        return cached
     try:
-        return disk_cached(f"finalbox|{lg.key}|{event_id}", TTL_FINAL_BOX, lambda: _fetch_box(lg, event_id))
+        out = _fetch_box(lg, event_id)
     except Exception:
-        return {}
+        return cached or {}
+    cache_write(key, out)
+    return out
+
+
+def played(row: dict | None) -> bool:
+    """Box-score row for someone who actually got on the floor / field / ice tonight."""
+    if not row or row.get("_dnp"):
+        return False
+    mins = next((row[k] for k in ("minutes", "min", "timeonice", "toi") if k in row), None)
+    return mins is None or (mins == mins and mins > 0)
 
 
 def actual_value(kind: str, m: str, row: dict | None) -> float | None:

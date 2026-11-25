@@ -201,7 +201,8 @@ streamlit run app.py
   * **📈 Your results (tunes the builder):**
     * **Tracking:** in the parlay builder, "📌 Track this parlay" saves the legs along with the hit chance the builder gave each one.
     * **Grading:** tracked legs are graded automatically from ESPN box scores once the games are final (✅ hit, ❌ miss, ➖ didn't play). Legs can also be marked by hand.
-    * **Screenshots:** "📷 Upload a betslip screenshot" reads the slip with OCR (Tesseract, installed through `packages.txt` on Streamlit Cloud). It matches each leg to tonight's players and pre-fills hit or miss from the sportsbook's green check or red ✕, for you to confirm before saving. Legs can also be added by hand.
+    * **Screenshots:** "📷 Upload a betslip screenshot" reads the slip with OCR (Tesseract, installed through `packages.txt` on Streamlit Cloud). It matches each leg to tonight's players and pre-fills hit or miss from the sportsbook's green check or red ✕, for you to confirm before saving. Legs can also be added by hand. The player list only shows people who have played tonight (from the live or final box score, excluding DNPs).
+    * **Auto-grading waits for a final box score:** live box scores refresh every 2 minutes and are never used to grade.
     * **Calibration:** once legs are graded, the builder compares what it said with what actually hit, overall and per market. It turns the gap into a factor (for example ×0.87) applied to every future leg's chance. The factor moves toward your results as they add up (shrunk toward the builder's own estimate), a market gets its own factor after 5 graded legs, and factors stay between ×0.70 and ×1.10.
     * **Backup:** results can be backed up and restored as .json.
   * **Loading:** the tab loads only when you open it, and all the slate's game logs load in parallel.

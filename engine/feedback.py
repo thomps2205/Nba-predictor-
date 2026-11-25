@@ -94,8 +94,8 @@ def grade_pending(leagues: dict, box_stats, actual_value) -> int:
             box = box_stats(lg, r["gid"])
         except Exception:
             box = {}
-        if not box:
-            continue
+        if not box or not box.get("_final"):
+            continue  # only grade finished games
         val = actual_value(lg.kind, r["m"], box.get(str(r["pid"])))
         if val is None:
             r["result"] = "void"  # didn't play

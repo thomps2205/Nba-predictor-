@@ -1029,13 +1029,13 @@ def streaks_fragment(games: list[dict], slate: dict, inj: list[dict]) -> None:
     view = st.segmented_control("Streak view", ["🔥 Streaks", "🧩 Parlay builder"], default="🔥 Streaks",
                                 key=f"stk_view_{sport}", label_visibility="collapsed", width="stretch") or "🔥 Streaks"
     if view == "🧩 Parlay builder":
-        streak_parlay(rows, proj, {g["id"]: g for g in chosen})
+        streak_parlay(rows, proj, {g["id"]: g for g in games})
         return
     render_streaks(rows, {g["id"]: g for g in chosen}, proj, sport,
                    ctx={"games": {g["id"]: g for g in chosen}, "slate": slate, "inj": inj, "rows": rows})
 
 
-def streak_parlay(rows: list[dict], proj: dict, games_by_id: dict) -> None:
+def streak_parlay(rows: list[dict], proj: dict, games_by_id: dict, slate_games: list[dict] | None = None) -> None:
     """Build a parlay of any size from players on streaks in the selected games."""
     players = {r["id"] for r in rows if r["kind"] == "player"}
     if not players:
@@ -1088,10 +1088,25 @@ def streak_parlay(rows: list[dict], proj: dict, games_by_id: dict) -> None:
                             "label": x["label"], "t": x["t"], "p": round(x["p"], 4),
                             "tier": "100%" if x.get("rate", 1) >= 0.999 else "80%+"} for x in picks], "builder")
         st.toast(f"Tracking {added} new leg{'s' if added != 1 else ''} — results tune the builder.")
-    feedback_section(rows)
+    feedback_section(rows, games_by_id)
 
 
-def feedback_section(rows: list[dict]) -> None:
+def played_tonight(games: list[dict]) -> dict:
+    """{athlete id: {name, pid, sport, gid, team}} for everyone who has played in tonight's started games."""
+    out = {}
+    for g in games:
+        if g.get("state") not in ("in", "post"):
+            continue
+        box = grade.box_stats(lg, g["id"])
+        for aid, row in box.items():
+            if aid.startswith("_") or not grade.played(row):
+                continue
+            out[aid] = {"name": row.get("_name") or aid, "pid": aid, "sport": lg.key, "gid": g["id"],
+                        "team": row.get("_team", ""), "final": bool(box.get("_final"))}
+    return dict(sorted(out.items(), key=lambda kv: (kv[1]["team"], kv[1]["name"])))
+
+
+def feedback_section(rows: list[dict], games_by_id: dict | None = None) -> None:
     """Your tracked legs: auto-graded from box scores, betslip screenshots, and the calibration they produce."""
     from datetime import date as _date
 
@@ -1124,8 +1139,7 @@ def feedback_section(rows: list[dict]) -> None:
     with st.expander("📷 Upload a betslip screenshot"):
         up = st.file_uploader("Betslip image", type=["png", "jpg", "jpeg", "webp"], key=f"fb_up_{sport}",
                               label_visibility="collapsed")
-        players = {r["id"]: {"name": r["name"], "pid": r["id"], "sport": lg.key, "gid": r["gid"]}
-                   for r in rows if r["kind"] == "player"}
+        players = played_tonight(list((games_by_id or {}).values()))
         if up is not None:
             from PIL import Image
 
@@ -1160,11 +1174,15 @@ def feedback_section(rows: list[dict]) -> None:
                         if res in ("hit", "miss") and idx is not None:
                             fbmod.set_result(idx, res)
                     st.rerun()
-        st.caption("Or add a leg by hand:")
+        st.caption("Or add a leg by hand (players who have played tonight):")
+        if not players:
+            st.caption("No one has played yet tonight — players show up here once their game tips off.")
         if players:
             pids = list(players)
             c1, c2 = st.columns(2)
-            pid = c1.selectbox("Player", pids, format_func=lambda i: players[i]["name"], key=f"fb_man_p_{sport}")
+            pid = c1.selectbox("Player", pids, key=f"fb_man_p_{sport}",
+                               format_func=lambda i: f'{players[i]["name"]} · {players[i]["team"]}'
+                               + ("" if players[i]["final"] else " (live)"))
             m = c2.selectbox("Market", list(mk_lab), format_func=mk_lab.get, key=f"fb_man_m_{sport}")
             c3, c4 = st.columns(2)
             t = c3.number_input("Line (N+)", 0.5, 600.0, 5.0, 0.5, key=f"fb_man_t_{sport}")
