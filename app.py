@@ -1194,28 +1194,7 @@ def feedback_section(rows: list[dict], games_by_id: dict | None = None) -> None:
                         if res in ("hit", "miss") and idx is not None:
                             fbmod.set_result(idx, res)
                     st.rerun()
-        pre = any(v.get("pre") for v in players.values())
-        st.caption("Or add a leg by hand — " + ("tonight's rosters (no one has played yet):" if pre else
-                   "players who played last night or tonight:"))
-        if players:
-            pids = list(players)
-            c1, c2 = st.columns(2)
-            pid = c1.selectbox("Player", pids, key=f"fb_man_p_{sport}",
-                               format_func=lambda i: f'{players[i]["name"]} · {players[i]["team"]}'
-                               + ("" if players[i]["final"] or players[i].get("pre") else " (live)"))
-            m = c2.selectbox("Market", list(mk_lab), format_func=mk_lab.get, key=f"fb_man_m_{sport}")
-            c3, c4 = st.columns(2)
-            t = c3.number_input("Line (N+)", 0.5, 600.0, 5.0, 0.5, key=f"fb_man_t_{sport}")
-            res = c4.segmented_control("Result", ["hit", "miss", "not settled"], default="not settled",
-                                       key=f"fb_man_r_{sport}") or "not settled"
-            if st.button("Add leg", key=f"fb_man_add_{sport}", width="stretch"):
-                x = {**players[pid], "m": m, "t": float(t)}
-                fbmod.add([{"sport": x["sport"], "gid": x["gid"], "pid": pid, "name": x["name"], "m": m,
-                            "label": mk_lab[m], "t": float(t), "p": _builder_p(rows, x), "tier": "manual"}], "manual")
-                idx = fbmod.find(pid, m, float(t))
-                if res in ("hit", "miss") and idx is not None:
-                    fbmod.set_result(idx, res)
-                st.rerun()
+        manual_leg_form(rows, mk_lab)
 
     mine = [(i, r) for i, r in enumerate(all_rows) if r.get("sport") == lg.key]
     if mine:
@@ -1244,6 +1223,79 @@ def feedback_section(rows: list[dict], games_by_id: dict | None = None) -> None:
             st.toast("Results restored.")
         except Exception as e:
             st.error(f"Not a results backup ({e}).")
+
+
+def game_players(g: dict) -> tuple[dict, str]:
+    """Players for one game: who actually played (box score), else both rosters. Returns (players, source)."""
+    box = grade.box_stats(lg, g["id"]) if g.get("state") in ("in", "post") else {}
+    out = {}
+    for aid, row in box.items():
+        if not aid.startswith("_") and grade.played(row):
+            out[aid] = {"name": row.get("_name") or aid, "pid": aid, "sport": lg.key, "gid": g["id"],
+                        "team": row.get("_team", "")}
+    if out:
+        return dict(sorted(out.items(), key=lambda kv: (kv[1]["team"], kv[1]["name"]))), (
+            "box score" if box.get("_final") else "live box score")
+    for side in ("away", "home"):
+        try:
+            for a in espn.roster_athletes(espn.team_roster(lg, g[side]["id"])):
+                out[a["id"]] = {"name": a["name"], "pid": a["id"], "sport": lg.key, "gid": g["id"],
+                                "team": g[side]["abbr"]}
+        except Exception:
+            continue
+    src = "rosters (box score not available yet)" if g.get("state") in ("in", "post") else "rosters (not started)"
+    return dict(sorted(out.items(), key=lambda kv: (kv[1]["team"], kv[1]["name"]))), src
+
+
+def manual_leg_form(rows: list[dict], mk_lab: dict) -> None:
+    """Add a leg by hand: date -> game -> player (one game at a time, so no player goes missing)."""
+    st.caption("Or add a leg by hand — pick the date, the game, then the player:")
+    try:
+        today_games = fetch_games(sport, today_et)
+    except Exception:
+        today_games = []
+    started = any(g["state"] in ("in", "post") for g in today_games)
+    d = st.date_input("Game date", value=today_et if started else today_et - timedelta(days=1),
+                      max_value=today_et, key=f"fb_man_d_{sport}")
+    try:
+        day_games = today_games if d == today_et else fetch_games(sport, d)
+    except Exception as e:
+        day_games = []
+        st.caption(f"Couldn't load that day's games ({type(e).__name__}).")
+    if not day_games:
+        st.caption(f"No {lg.label} games on {d:%b %d}.")
+        return
+    status = {"post": "Final", "in": "Live"}
+    gid = st.selectbox("Game", [g["id"] for g in day_games], key=f"fb_man_g_{sport}_{d}",
+                       format_func=lambda i: next(
+                           f'{g["away"]["abbr"]} @ {g["home"]["abbr"]} · '
+                           + status.get(g["state"], f'{g["tip"]:%-I:%M %p}' if g["tip"] is not None else "")
+                           for g in day_games if g["id"] == i))
+    g = next(x for x in day_games if x["id"] == gid)
+    with st.spinner("Loading players…"):
+        players, src = game_players(g)
+    if not players:
+        st.caption("No players found for this game yet.")
+        return
+    st.caption(f"{len(players)} players · from the {src}")
+    c1, c2 = st.columns(2)
+    pid = c1.selectbox("Player", list(players), key=f"fb_man_p_{sport}_{gid}",
+                       format_func=lambda i: f'{players[i]["name"]} · {players[i]["team"]}')
+    m = c2.selectbox("Market", list(mk_lab), format_func=mk_lab.get, key=f"fb_man_m_{sport}")
+    c3, c4 = st.columns(2)
+    t = c3.number_input("Line (N+)", 0.5, 600.0, 5.0, 0.5, key=f"fb_man_t_{sport}")
+    res = c4.segmented_control("Result", ["hit", "miss", "not settled"], default="not settled",
+                               key=f"fb_man_r_{sport}") or "not settled"
+    if st.button("Add leg", key=f"fb_man_add_{sport}", width="stretch"):
+        x = {**players[pid], "m": m, "t": float(t)}
+        fbmod.add([{"sport": x["sport"], "gid": x["gid"], "pid": pid, "name": x["name"], "m": m,
+                    "label": mk_lab[m], "t": float(t), "p": _builder_p(rows, x), "tier": "manual",
+                    "game_date": d.isoformat()}], "manual")
+        idx = fbmod.find(pid, m, float(t))
+        if res in ("hit", "miss") and idx is not None:
+            fbmod.set_result(idx, res)
+        st.toast(f"Added {players[pid]['name']} {_fmt_line(float(t))}+ {mk_lab[m]}.")
+        st.rerun()
 
 
 def _builder_p(rows: list[dict], x: dict) -> float:
